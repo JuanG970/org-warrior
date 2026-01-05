@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""
+org-warrior: A TaskWarrior-like CLI interface using org-ql as backend.
+Executes org-ql queries via Emacs in batch mode.
+"""
+
+import subprocess
+import sys
+import os
+import re
+import shutil
+
+
+# Configuration
+ORG_FILES = os.environ.get("ORG_WARRIOR_FILES", "~/org")
+EMACS_CMD = os.environ.get("EMACS_CMD", "emacsclient")
+EMACS_SERVER = os.environ.get("ORG_WARRIOR_SERVER", "edit")
+EMACS_LOAD_PATH = os.environ.get("ORG_WARRIOR_LOAD_PATH", "")
+
+
+def get_doom_load_paths():
+    """Get load paths for Doom Emacs straight packages."""
+    home = os.path.expanduser("~")
+    straight_dir = os.path.join(home, ".emacs.d", ".local", "straight")
+    
+    if not os.path.isdir(straight_dir):
+        return []
+    
+    # Find build directory (e.g., build-30.2), exclude cache files
+    build_dirs = [d for d in os.listdir(straight_dir) 
+                  if d.startswith("build") and os.path.isdir(os.path.join(straight_dir, d))]
+    if not build_dirs:
+        return []
+    
+    build_dir = os.path.join(straight_dir, sorted(build_dirs)[-1])
+    
+    # Required packages for org-ql
+    required = ["org-ql", "org", "dash", "s", "ts", "peg", "ov", 
+                "org-super-agenda", "compat", "f", "ht", "map"]
+    
+    paths = []
+    for pkg in required:
+        pkg_path = os.path.join(build_dir, pkg)
+        if os.path.isdir(pkg_path):
+            paths.append(pkg_path)
+    
+    return paths
+
+
+def build_load_path_elisp():
+    """Build elisp to add load paths."""
+    paths = []
+    
+    # Custom load path from environment
+    if EMACS_LOAD_PATH:
+        paths.extend(EMACS_LOAD_PATH.split(":"))
+    
+    # Auto-detect Doom Emacs
+    paths.extend(get_doom_load_paths())
+    
+    if not paths:
+        return ""
+    
+    elisp_parts = [f'(add-to-list \'load-path "{p}")' for p in paths]
+    return " ".join(elisp_parts)
+
+
+def resolve_org_files(files_spec):
+    """Return a list of .org files from a file/dir or path-separated list, including nested."""
+    if isinstance(files_spec, (list, tuple)):
+        specs = files_spec
+    else:
+        specs = str(files_spec).split(os.pathsep)
+    resolved = []
+    for spec in specs:
+        if not spec:
+            continue
+        path = os.path.expanduser(spec)
+        if os.path.isdir(path):
+            for root, _, filenames in os.walk(path):
+                for fname in filenames:
+                    if fname.endswith(".org"):
+                        resolved.append(os.path.join(root, fname))
+        elif os.path.isfile(path):
+            resolved.append(path)
+    # Deduplicate preserving first-seen order
+    seen = set()
+    unique = []
+    for f in resolved:
+        if f not in seen:
+            seen.add(f)
+            unique.append(f)
+    return unique
+
+
+def build_agenda_files_eval(files_spec):
+    """Build elisp to set org-agenda-files from resolved paths."""
+    files = resolve_org_files(files_spec)
+    if not files:
+        return None
+    escaped_files = [f.replace('"', '\\"') for f in files]
+    file_list = " ".join(f'"{f}"' for f in escaped_files)
+    return f"(setq org-agenda-files '({file_list}))"
+
+
+def run_org_ql(query, files=None, select="heading"):
+    """Run an org-ql query via Emacs batch mode and return results."""
+    files = files or ORG_FILES
+    
+    if select == "heading":
+        select_expr = "(substring-no-properties (org-get-heading t t t t))"
+    elif select == "full":
+        select_expr = """(list (substring-no-properties (org-get-heading t t t t))
+                              (org-entry-get nil "TODO")
+                              (org-entry-get nil "PRIORITY")
+                              (org-entry-get nil "DEADLINE")
+                              (org-entry-get nil "SCHEDULED")
+                              (buffer-file-name)
+                              (line-number-at-pos))"""
+    else:
+        select_expr = select
+
+    load_paths = build_load_path_elisp()
+    
+    # Configure org-todo-keywords for batch mode
+    todo_setup = """(setq org-todo-keywords 
+                     '((sequence "TODO" "NEXT" "WAITING" "PROJECT" "|" "DONE" "CANCELLED")))"""
+    
+    agenda_files_eval = build_agenda_files_eval(files)
+    if not agenda_files_eval:
+        print("Error: no org files found.", file=sys.stderr)
+        return []
+
+    elisp = f"""
+(progn
+  {load_paths}
+  {todo_setup}
+  (require 'org-ql)
+  (let ((results (org-ql-select (org-agenda-files)
+                   '{query}
+                   :action '{select_expr})))
+    (mapconcat (lambda (r)
+                 (if (listp r)
+                     (format "%S" r)
+                   (format "%s" r)))
+               results
+               "\\n")))
+"""
+    
+    cmd = [
+        EMACS_CMD, "-s", EMACS_SERVER, "-e", 
+        f"(progn {agenda_files_eval} {elisp})"
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 and result.stderr:
+        errors = [l for l in result.stderr.split('\n') 
+                  if l and not l.startswith('Loading') and 'Warning' not in l]
+        if errors:
+            print(f"Error: {' '.join(errors)}", file=sys.stderr)
+    
+    # emacsclient returns the result wrapped in quotes, strip them
+    output = result.stdout.strip()
+    if output.startswith('"') and output.endswith('"'):
+        output = output[1:-1]
+    # Unescape newlines and quotes
+    output = output.replace('\\n', '\n').replace('\\"', '"')
+    return output.split('\n') if output else []
+
+
+def parse_result(line):
+    """Parse a result line from org-ql output."""
+    if line.startswith('('):
+        # Format: ("heading" "TODO" "A" deadline scheduled "filepath" lineno)
+        # Deadline/scheduled can be nil or "<date>"
+        match = re.match(
+            r'\("([^"]*)" (nil|"[^"]*") "([^"]*)" (nil|"[^"]*") (nil|"[^"]*") "([^"]*)" (\d+)\)',
+            line
+        )
+        if match:
+            heading, todo, priority, deadline, scheduled, filepath, lineno = match.groups()
+            return {
+                'heading': heading,
+                'todo': None if todo == 'nil' else todo.strip('"'),
+                'priority': priority if priority and priority != 'B' else None,  # B is default
+                'deadline': deadline.strip('"') if deadline != 'nil' else None,
+                'scheduled': scheduled.strip('"') if scheduled != 'nil' else None,
+                'file': filepath,
+                'line': int(lineno)
+            }
+    return {'heading': line}
+
+
+def format_task(task, idx=None):
+    """Format a task for display."""
+    parts = []
+    if idx is not None:
+        parts.append(f"{idx:3d}")
+    
+    if task.get('todo'):
+        parts.append(f"[{task['todo']}]")
+    
+    if task.get('priority'):
+        parts.append(f"({task['priority']})")
+    
+    parts.append(task.get('heading', ''))
+    
+    if task.get('deadline'):
+        parts.append(f"DUE:{task['deadline']}")
+    elif task.get('scheduled'):
+        parts.append(f"SCH:{task['scheduled']}")
+    
+    return ' '.join(parts)
+
+
+def format_task_detail(task, idx=None):
+    """Format a task with file/line details."""
+    lines = []
+    prefix = f"Task {idx}:" if idx is not None else "Task:"
+    lines.append(prefix)
+    heading = task.get('heading', '')
+    todo = task.get('todo')
+    priority = task.get('priority')
+    if todo:
+        heading = f"[{todo}] {heading}"
+    if priority:
+        heading = f"({priority}) {heading}"
+    lines.append(f"  {heading}")
+    if task.get('deadline'):
+        lines.append(f"  Deadline: {task['deadline']}")
+    if task.get('scheduled'):
+        lines.append(f"  Scheduled: {task['scheduled']}")
+    file_info = task.get('file')
+    line_no = task.get('line')
+    if file_info and line_no:
+        lines.append(f"  Location: {file_info}:{line_no}")
+    return "\n".join(lines)
+
+
+def print_results(results, empty_msg="No tasks found."):
+    """Print formatted results."""
+    if not results or (len(results) == 1 and not results[0]):
+        print(empty_msg)
+        return 0
+    
+    for i, line in enumerate(results, 1):
+        task = parse_result(line)
+        print(format_task(task, i))
+    
+    print(f"\n{len(results)} task(s)")
+    return len(results)
+
+
+def cmd_task(args):
+    """Show details for a single task by index from the given query (default list)."""
+    if not args:
+        print("Usage: org-warrior task <id> [filters]", file=sys.stderr)
+        return
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print("Error: task id must be a number.", file=sys.stderr)
+        return
+    query = build_query(args[1:])
+    results = run_org_ql(query, select="full")
+    if idx < 1 or idx > len(results):
+        print(f"Task id {idx} out of range (1-{len(results)}).", file=sys.stderr)
+        return
+    task = parse_result(results[idx - 1])
+    print(format_task_detail(task, idx))
+
+
+def cmd_list(args):
+    """List tasks matching filters."""
+    query = build_query(args)
+    results = run_org_ql(query, select="full")
+    print_results(results)
+
+
+def cmd_next(args):
+    """Show next actions (NEXT keyword or high priority TODO)."""
+    query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No next actions found.")
+
+
+def cmd_today(args):
+    """Show tasks due or scheduled for today."""
+    query = '(or (deadline :on today) (scheduled :on today) (ts-active :on today))'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No tasks for today.")
+
+
+def cmd_week(args):
+    """Show tasks for the coming week."""
+    query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No tasks for this week.")
+
+
+def cmd_overdue(args):
+    """Show overdue tasks."""
+    query = '(and (not (done)) (deadline :to -1))'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No overdue tasks.")
+
+
+def cmd_done(args):
+    """Show recently completed tasks."""
+    query = '(closed :from -7 :to today)'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No recently completed tasks.")
+
+
+def cmd_projects(args):
+    """Show active projects."""
+    query = '(and (todo "PROJECT") (not (done)))'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No active projects.")
+
+
+def cmd_search(args):
+    """Search tasks by text."""
+    if not args:
+        print("Usage: org-warrior search <pattern>", file=sys.stderr)
+        return
+    
+    pattern = ' '.join(args)
+    query = f'(regexp "{pattern}")'
+    results = run_org_ql(query, select="full")
+    print_results(results, f"No tasks matching '{pattern}'.")
+
+
+def cmd_tag(args):
+    """List tasks with a specific tag."""
+    if not args:
+        print("Usage: org-warrior tag <tagname>", file=sys.stderr)
+        return
+    
+    tag = args[0]
+    query = f'(and (not (done)) (tags "{tag}"))'
+    results = run_org_ql(query, select="full")
+    print_results(results, f"No tasks with tag '{tag}'.")
+
+
+def cmd_priority(args):
+    """List tasks by priority."""
+    pri = args[0].upper() if args else "A"
+    query = f'(and (not (done)) (priority "{pri}"))'
+    results = run_org_ql(query, select="full")
+    print_results(results, f"No priority {pri} tasks.")
+
+
+def cmd_waiting(args):
+    """Show waiting tasks."""
+    query = '(todo "WAITING")'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No waiting tasks.")
+
+
+def cmd_stuck(args):
+    """Show stuck projects (projects without NEXT actions)."""
+    query = '(and (todo "PROJECT") (not (done)) (not (descendants (todo "NEXT"))))'
+    results = run_org_ql(query, select="full")
+    print_results(results, "No stuck projects.")
+
+
+def cmd_query(args):
+    """Run a raw org-ql query."""
+    if not args:
+        print("Usage: org-warrior query '<org-ql-expression>'", file=sys.stderr)
+        return
+    
+    query = ' '.join(args)
+    results = run_org_ql(query, select="full")
+    print_results(results, "No results.")
+
+
+def build_query(args):
+    """Build org-ql query from TaskWarrior-like filters."""
+    if not args:
+        return '(and (todo) (not (done)))'
+    
+    conditions = ['(not (done))']
+    
+    for arg in args:
+        if arg.startswith('+'):
+            conditions.append(f'(tags "{arg[1:]}")')
+        elif arg.startswith('project:'):
+            conditions.append('(ancestors (todo "PROJECT"))')
+        elif arg.startswith('pri:') or arg.startswith('priority:'):
+            pri = arg.split(':')[1].upper()
+            conditions.append(f'(priority "{pri}")')
+        elif arg.startswith('due:'):
+            due = arg.split(':')[1]
+            if due == 'today':
+                conditions.append('(deadline :on today)')
+            elif due == 'week':
+                conditions.append('(deadline :from today :to +7)')
+            elif due == 'overdue':
+                conditions.append('(deadline :to -1)')
+        elif arg.startswith('scheduled:'):
+            sched = arg.split(':')[1]
+            if sched == 'today':
+                conditions.append('(scheduled :on today)')
+        else:
+            conditions.append(f'(regexp "{arg}")')
+    
+    if len(conditions) == 1:
+        return conditions[0]
+    return f'(and {" ".join(conditions)})'
+
+
+def print_help():
+    """Print usage help."""
+    help_text = """
+org-warrior - TaskWarrior-like interface for org-ql
+
+USAGE:
+    org-warrior <command> [options]
+
+COMMANDS:
+    list [filters]    List tasks (default command)
+    task <id> [filters] Show details for a task by index
+    next              Show next actions
+    today             Tasks due/scheduled today
+    week              Tasks for the coming week
+    overdue           Overdue tasks
+    done              Recently completed tasks
+    projects          Active projects
+    stuck             Stuck projects (no NEXT actions)
+    waiting           Waiting tasks
+    tag <name>        Tasks with specific tag
+    priority <A|B|C>  Tasks by priority
+    search <pattern>  Search tasks by text
+    query <expr>      Run raw org-ql expression
+
+FILTERS (for list command):
+    +tag              Filter by tag
+    project:          Filter to project subtasks
+    pri:A             Filter by priority
+    due:today         Due today
+    due:week          Due this week
+    due:overdue       Overdue items
+    scheduled:today   Scheduled today
+    <text>            Text search
+
+ENVIRONMENT:
+    ORG_WARRIOR_FILES   Path(s) to org files or directories (os.pathsep-separated, recursive; default: ~/org)
+    EMACS_CMD           Emacs command (default: emacs)
+
+EXAMPLES:
+    org-warrior                     # List all open tasks
+    org-warrior today               # Today's tasks
+    org-warrior +work due:week      # Work tasks due this week
+    org-warrior search meeting      # Search for 'meeting'
+    org-warrior query '(todo "NEXT")'  # Raw org-ql query
+"""
+    print(help_text.strip())
+
+
+def main():
+    args = sys.argv[1:]
+    
+    if not args or args[0] in ['-h', '--help', 'help']:
+        print_help()
+        return
+    
+    commands = {
+        'list': cmd_list,
+        'task': cmd_task,
+        'next': cmd_next,
+        'today': cmd_today,
+        'week': cmd_week,
+        'overdue': cmd_overdue,
+        'done': cmd_done,
+        'projects': cmd_projects,
+        'stuck': cmd_stuck,
+        'waiting': cmd_waiting,
+        'tag': cmd_tag,
+        'priority': cmd_priority,
+        'search': cmd_search,
+        'query': cmd_query,
+    }
+    
+    cmd = args[0]
+    cmd_args = args[1:]
+    
+    if cmd in commands:
+        commands[cmd](cmd_args)
+    else:
+        cmd_list(args)
+
+
+if __name__ == '__main__':
+    main()
