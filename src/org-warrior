@@ -376,6 +376,71 @@ def cmd_query(args):
     print_results(results, "No results.")
 
 
+def cmd_start(args):
+    """Clock in to a task by ID from a filter context."""
+    if not args:
+        print("Usage: org-warrior start <filter> <task-id>", file=sys.stderr)
+        print("Example: org-warrior start today 1", file=sys.stderr)
+        return
+    
+    # Last argument should be the task ID
+    try:
+        task_id = int(args[-1])
+        filter_args = args[:-1]
+    except ValueError:
+        print("Error: last argument must be a task ID (number).", file=sys.stderr)
+        return
+    
+    # Determine the query based on filter
+    if not filter_args:
+        query = '(and (todo) (not (done)))'
+    elif filter_args[0] == 'today':
+        query = '(or (deadline :on today) (scheduled :on today) (ts-active :on today))'
+    elif filter_args[0] == 'next':
+        query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+    elif filter_args[0] == 'week':
+        query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
+    else:
+        query = build_query(filter_args)
+    
+    # Get the list of tasks
+    results = run_org_ql(query, select="full")
+    
+    if not results or (len(results) == 1 and not results[0]):
+        print("No tasks found for the given filter.", file=sys.stderr)
+        return
+    
+    if task_id < 1 or task_id > len(results):
+        print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
+        return
+    
+    # Parse the task to get file and line number
+    task = parse_result(results[task_id - 1])
+    filepath = task.get('file')
+    lineno = task.get('line')
+    
+    if not filepath or not lineno:
+        print("Error: could not determine task location.", file=sys.stderr)
+        return
+    
+    # Build elisp to open file, go to line, and clock in
+    elisp = f'''(progn
+      (find-file "{filepath}")
+      (goto-char (point-min))
+      (forward-line {lineno - 1})
+      (org-clock-in))'''
+    
+    cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"Error clocking in: {result.stderr}", file=sys.stderr)
+        return
+    
+    print(f"✓ Clocked in to task {task_id}: {task.get('heading')}")
+
+
 def build_query(args):
     """Build org-ql query from TaskWarrior-like filters."""
     if not args:
@@ -434,6 +499,7 @@ COMMANDS:
     priority <A|B|C>  Tasks by priority
     search <pattern>  Search tasks by text
     query <expr>      Run raw org-ql expression
+    start <filter> <id>  Clock in to a task (e.g., org-warrior start today 1)
 
 FILTERS (for list command):
     +tag              Filter by tag
@@ -447,7 +513,8 @@ FILTERS (for list command):
 
 ENVIRONMENT:
     ORG_WARRIOR_FILES   Path(s) to org files or directories (os.pathsep-separated, recursive; default: ~/org)
-    EMACS_CMD           Emacs command (default: emacs)
+    EMACS_CMD           Emacs command (default: emacsclient)
+    ORG_WARRIOR_SERVER  Emacs server name (default: edit)
 
 EXAMPLES:
     org-warrior                     # List all open tasks
@@ -455,6 +522,7 @@ EXAMPLES:
     org-warrior +work due:week      # Work tasks due this week
     org-warrior search meeting      # Search for 'meeting'
     org-warrior query '(todo "NEXT")'  # Raw org-ql query
+    org-warrior start today 1       # Clock in to first task from today
 """
     print(help_text.strip())
 
@@ -481,6 +549,7 @@ def main():
         'priority': cmd_priority,
         'search': cmd_search,
         'query': cmd_query,
+        'start': cmd_start,
     }
     
     cmd = args[0]
