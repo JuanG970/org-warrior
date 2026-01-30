@@ -11,6 +11,22 @@ import re
 import shutil
 
 
+
+def git_commit_org(message: str):
+    """Auto-commit changes in ~/org if it's a git repo and there are modifications."""
+    org_root = os.path.expanduser('~/org')
+    if not os.path.isdir(os.path.join(org_root, '.git')):
+        return
+    # Only commit when there are changes
+    st = subprocess.run(['git', '-C', org_root, 'status', '--porcelain'], capture_output=True, text=True)
+    if st.returncode != 0:
+        return
+    if not st.stdout.strip():
+        return
+    subprocess.run(['git', '-C', org_root, 'add', '-A'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['git', '-C', org_root, 'commit', '-m', message], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 # Configuration
 ORG_FILES = os.environ.get("ORG_WARRIOR_FILES", "~/org")
 EMACS_CMD = os.environ.get("EMACS_CMD", "emacsclient")
@@ -476,7 +492,10 @@ def build_query(args):
 def emacs_eval(elisp: str) -> str:
     """Evaluate ELisp in the running Emacs daemon and return stdout (stripped)."""
     cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('emacsclient timed out (Emacs may be busy or waiting for input)')
     if r.returncode != 0:
         raise RuntimeError((r.stderr or '').strip() or 'emacsclient eval failed')
     out = (r.stdout or '').strip()
@@ -494,24 +513,15 @@ def cmd_show(args):
     if args[0] == 'index':
         return cmd_task(args[1:])
     org_id = args[0]
-    elisp = rf"""(progn
-      (require 'org)
-      (require 'org-id)
-      (let ((m (org-id-find "{org_id}" t)))
-        (if (not m)
-            (princ "NOT_FOUND")
-          (with-current-buffer (marker-buffer m)
-            (goto-char m)
-            (princ (format \"%s\\n%s\\n%s:%d\\n\"
-                           (or (org-get-heading t t t t) \"\")
-                           (or (org-get-todo-state) \"\")
-                           (buffer-file-name)
-                           (line-number-at-pos)))))))"""
-    out = emacs_eval(elisp).strip()
-    if out == 'NOT_FOUND':
+    # org-ql property query (fast, avoids org-id global scan)
+    query = f'(property "ID" "{org_id}")'
+    results = run_org_ql(query, select="full")
+    if not results or (len(results) == 1 and not results[0]):
         print(f"No entry found for ID {org_id}")
-    else:
-        print(out)
+        return
+    task = parse_result(results[0])
+    print(format_task_detail(task))
+
 
 
 def cmd_add(args):
@@ -532,11 +542,14 @@ def cmd_add(args):
           (insert (format "* %s\n" heading)))
         (org-end-of-subtree t t)
         (unless (bolp) (insert "\n"))
-        (insert (format "** TODO %s\n" "{title}"))
-        (org-id-get-create)
-        (save-buffer)
-        (princ (org-id-get))))"""
+        (let ((pos (point)))
+          (insert (format "** TODO %s\n" "{title}"))
+          (goto-char pos)
+          (org-id-get-create)
+          (save-buffer)
+          (princ (org-id-get)))))"""
     new_id = emacs_eval(elisp).strip()
+    git_commit_org(f"org-warrior: add {new_id}")
     print(f"Created: {new_id}")
 
 
@@ -562,6 +575,7 @@ def cmd_set_state(args):
     if out == 'NOT_FOUND':
         print(f"No entry found for ID {org_id}")
     else:
+        git_commit_org(f"org-warrior: set-state {org_id} {state}")
         print("✓ Updated")
 
 
@@ -587,6 +601,7 @@ def cmd_schedule(args):
     if out == 'NOT_FOUND':
         print(f"No entry found for ID {org_id}")
     else:
+        git_commit_org(f"org-warrior: schedule {org_id} {date}")
         print("✓ Scheduled")
 
 
