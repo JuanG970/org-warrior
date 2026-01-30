@@ -121,11 +121,6 @@ def run_org_ql(query, files=None, select="heading"):
         select_expr = select
 
     load_paths = build_load_path_elisp()
-    
-    # Configure org-todo-keywords for batch mode
-    todo_setup = """(setq org-todo-keywords 
-                     '((sequence "TODO" "NEXT" "WAITING" "PROJECT" "|" "DONE" "CANCELLED")))"""
-    
     agenda_files_eval = build_agenda_files_eval(files)
     if not agenda_files_eval:
         print("Error: no org files found.", file=sys.stderr)
@@ -134,7 +129,6 @@ def run_org_ql(query, files=None, select="heading"):
     elisp = f"""
 (progn
   {load_paths}
-  {todo_setup}
   (require 'org-ql)
   (let ((results (org-ql-select (org-agenda-files)
                    '{query}
@@ -476,6 +470,133 @@ def build_query(args):
     return f'(and {" ".join(conditions)})'
 
 
+
+
+
+def emacs_eval(elisp: str) -> str:
+    """Evaluate ELisp in the running Emacs daemon and return stdout (stripped)."""
+    cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or '').strip() or 'emacsclient eval failed')
+    out = (r.stdout or '').strip()
+    # emacsclient prints strings with quotes
+    if out.startswith('"') and out.endswith('"'):
+        out = out[1:-1]
+    return out.replace('\\n', '\n').replace('\\"', '"')
+
+
+def cmd_show(args):
+    """Show a task by Org ID (preferred) or by list index (fallback)."""
+    if not args:
+        print("Usage: org-warrior show <ORG-ID> | show index <n> [filters]", file=sys.stderr)
+        return
+    if args[0] == 'index':
+        return cmd_task(args[1:])
+    org_id = args[0]
+    elisp = rf"""(progn
+      (require 'org)
+      (require 'org-id)
+      (let ((m (org-id-find "{org_id}" t)))
+        (if (not m)
+            (princ "NOT_FOUND")
+          (with-current-buffer (marker-buffer m)
+            (goto-char m)
+            (princ (format \"%s\\n%s\\n%s:%d\\n\"
+                           (or (org-get-heading t t t t) \"\")
+                           (or (org-get-todo-state) \"\")
+                           (buffer-file-name)
+                           (line-number-at-pos)))))))"""
+    out = emacs_eval(elisp).strip()
+    if out == 'NOT_FOUND':
+        print(f"No entry found for ID {org_id}")
+    else:
+        print(out)
+
+
+def cmd_add(args):
+    """Add a new TODO to ~/org/inbox.org under 'Inbox' and create an org ID."""
+    if not args:
+        print("Usage: org-warrior add <title>", file=sys.stderr)
+        return
+    title = ' '.join(args).replace('\\', '\\\\').replace('"', '\\"')
+    elisp = rf"""(progn
+      (require 'org)
+      (require 'org-id)
+      (let* ((file (expand-file-name "~/org/inbox.org"))
+             (heading "Inbox"))
+        (find-file file)
+        (goto-char (point-min))
+        (unless (re-search-forward (format "^\\*+ %s\\b" (regexp-quote heading)) nil t)
+          (goto-char (point-max))
+          (insert (format "* %s\n" heading)))
+        (org-end-of-subtree t t)
+        (unless (bolp) (insert "\n"))
+        (insert (format "** TODO %s\n" "{title}"))
+        (org-id-get-create)
+        (save-buffer)
+        (princ (org-id-get))))"""
+    new_id = emacs_eval(elisp).strip()
+    print(f"Created: {new_id}")
+
+
+def cmd_set_state(args):
+    """Set TODO state for an entry by Org ID."""
+    if len(args) < 2:
+        print("Usage: org-warrior set-state <ORG-ID> <STATE>", file=sys.stderr)
+        return
+    org_id, state = args[0], args[1]
+    state = state.replace('"', '')
+    elisp = rf"""(progn
+      (require 'org)
+      (require 'org-id)
+      (let ((m (org-id-find "{org_id}" t)))
+        (if (not m)
+            (princ "NOT_FOUND")
+          (with-current-buffer (marker-buffer m)
+            (goto-char m)
+            (org-todo "{state}")
+            (save-buffer)
+            (princ "OK")))))"""
+    out = emacs_eval(elisp).strip()
+    if out == 'NOT_FOUND':
+        print(f"No entry found for ID {org_id}")
+    else:
+        print("✓ Updated")
+
+
+def cmd_schedule(args):
+    """Schedule an entry by Org ID (date like YYYY-MM-DD or +1d)."""
+    if len(args) < 2:
+        print("Usage: org-warrior schedule <ORG-ID> <DATE>", file=sys.stderr)
+        return
+    org_id, date = args[0], ' '.join(args[1:]).replace('"', '')
+    elisp = rf"""(progn
+      (require 'org)
+      (require 'org-id)
+      (let ((m (org-id-find "{org_id}" t)))
+        (if (not m)
+            (princ "NOT_FOUND")
+          (with-current-buffer (marker-buffer m)
+            (goto-char m)
+            (let ((d (org-read-date nil nil "{date}")))
+              (org-schedule nil d))
+            (save-buffer)
+            (princ "OK")))))"""
+    out = emacs_eval(elisp).strip()
+    if out == 'NOT_FOUND':
+        print(f"No entry found for ID {org_id}")
+    else:
+        print("✓ Scheduled")
+
+
+def cmd_jira_sync(args):
+    """Trigger org-jira sync inside Emacs. NOTE: hits external Jira service."""
+    elisp = """(progn (require 'org-jira) (org-jira-get-issues) (princ "OK"))"""
+    out = emacs_eval(elisp).strip()
+    print("✓ Jira sync triggered" if out == 'OK' else out)
+
+
 def print_help():
     """Print usage help."""
     help_text = """
@@ -486,6 +607,7 @@ USAGE:
 
 COMMANDS:
     list [filters]    List tasks (default command)
+    show <ORG-ID>        Show details for a task by org ID (preferred)
     task <id> [filters] Show details for a task by index
     next              Show next actions
     today             Tasks due/scheduled today
@@ -536,6 +658,7 @@ def main():
     
     commands = {
         'list': cmd_list,
+        'show': cmd_show,
         'task': cmd_task,
         'next': cmd_next,
         'today': cmd_today,
@@ -550,6 +673,10 @@ def main():
         'search': cmd_search,
         'query': cmd_query,
         'start': cmd_start,
+        'jira-sync': cmd_jira_sync,
+        'schedule': cmd_schedule,
+        'set-state': cmd_set_state,
+        'add': cmd_add,
     }
     
     cmd = args[0]

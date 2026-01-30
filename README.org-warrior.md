@@ -1,15 +1,13 @@
-Org-warrior extensions (draft)
+org-warrior (draft)
 
 Overview
-- email_import.py: import a notmuch message into ~/org/inbox.org as a TODO with properties.
-- remind_scheduler.py: scan org files for :remind:telegram and schedule reminders (daily digest, meeting reminders) and manage deep-work sessions (50/10 check-ins).
+- `src/org-warrior`: TaskWarrior-like CLI using **org-ql** as a backend.
+  - Executes org-ql queries via an existing Emacs daemon (`emacsclient --socket-name edit`).
+  - Intended to be org-file centric: read/query tasks quickly; write operations go through Emacs/Org for correctness (IDs, scheduling, state changes).
 
 Usage
-- python3 email_import.py <message-id>
-- python3 remind_scheduler.py --dry-run
-- python3 remind_scheduler.py deep-start --task-id <ORG-ID>
-- python3 remind_scheduler.py deep-end --session-id <SESSION>
+- `./src/org-warrior --help`
 
 Notes
-- This is a draft. It edits org files directly; backups are created before changes.
-- It uses the `notmuch` CLI and simple org file string edits. For more robust edits we can switch to orgparse or python-org-mode libraries.
+- Uses `org-id` for stable task identifiers.
+- Requires a running Emacs server (`edit`).
