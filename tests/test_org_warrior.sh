@@ -3,7 +3,7 @@
 # Run with: ./test_org_warrior.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ORG_WARRIOR="${SCRIPT_DIR}/org-warrior"
+ORG_WARRIOR="${SCRIPT_DIR}/../src/org-warrior"
 TEST_DIR="/tmp/org-warrior-test-$$"
 FAILED=0
 PASSED=0
@@ -51,6 +51,8 @@ CLOSED: $CLOSED_RECENT
 ** TODO Paint walls
 * TODO [#C] Clean garage :home:
 DEADLINE: $OVERDUE
+* TODO Pay rent :finance:
+SCHEDULED: $OVERDUE
 * DONE Old task
 CLOSED: $CLOSED_OLD
 EOF
@@ -114,7 +116,7 @@ test_list() {
     assert_contains "$output" "Buy groceries" "list shows TODO tasks"
     assert_contains "$output" "Finish report" "list shows TODO with priority"
     assert_contains "$output" "Nested action" "list includes nested org files"
-    assert_count "$output" "13" "list returns correct count"
+    assert_count "$output" "14" "list returns correct count"
 }
 
 test_task_detail() {
@@ -142,7 +144,9 @@ test_today() {
     assert_contains "$output" "Buy groceries" "today shows deadline today"
     assert_contains "$output" "Finish report" "today shows scheduled today"
     assert_contains "$output" "Nested action" "today includes nested deadlines"
-    assert_count "$output" "3" "today returns correct count"
+    assert_contains "$output" "Clean garage" "today includes overdue deadlines"
+    assert_contains "$output" "Pay rent" "today includes overdue scheduled"
+    assert_count "$output" "5" "today returns correct count"
 }
 
 # Test: Overdue tasks

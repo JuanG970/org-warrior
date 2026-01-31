@@ -295,8 +295,10 @@ def cmd_next(args):
 
 
 def cmd_today(args):
-    """Show tasks due or scheduled for today."""
-    query = '(or (deadline :on today) (scheduled :on today) (ts-active :on today))'
+    """Show tasks due/scheduled up to today (overdue + today)."""
+    # Include overdue deadlines/scheduled items as well as items happening today.
+    # Exclude DONE/CANCELLED via (not (done)).
+    query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     results = run_org_ql(query, select="full")
     print_results(results, "No tasks for today.")
 
@@ -405,7 +407,7 @@ def cmd_start(args):
     if not filter_args:
         query = '(and (todo) (not (done)))'
     elif filter_args[0] == 'today':
-        query = '(or (deadline :on today) (scheduled :on today) (ts-active :on today))'
+        query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     elif filter_args[0] == 'next':
         query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
     elif filter_args[0] == 'week':
