@@ -582,29 +582,145 @@ def cmd_set_state(args):
 
 
 def cmd_schedule(args):
-    """Schedule an entry by Org ID (date like YYYY-MM-DD or +1d)."""
+    """Schedule a task by filter and ID (e.g., org-warrior schedule "6pm" today 1)."""
     if len(args) < 2:
-        print("Usage: org-warrior schedule <ORG-ID> <DATE>", file=sys.stderr)
+        print("Usage: org-warrior schedule <DATE> [filter...] <task-id>", file=sys.stderr)
+        print("Example: org-warrior schedule \"6pm\" today 1", file=sys.stderr)
+        print("Example: org-warrior schedule \"+1d\" +work 2", file=sys.stderr)
         return
-    org_id, date = args[0], ' '.join(args[1:]).replace('"', '')
-    elisp = rf"""(progn
-      (require 'org)
-      (require 'org-id)
-      (let ((m (org-id-find "{org_id}" t)))
-        (if (not m)
-            (princ "NOT_FOUND")
-          (with-current-buffer (marker-buffer m)
-            (goto-char m)
-            (let ((d (org-read-date nil nil "{date}")))
-              (org-schedule nil d))
-            (save-buffer)
-            (princ "OK")))))"""
-    out = emacs_eval(elisp).strip()
-    if out == 'NOT_FOUND':
-        print(f"No entry found for ID {org_id}")
+    
+    # First argument is the date, last is task ID, middle are filters
+    try:
+        task_id = int(args[-1])
+        date = args[0].replace('"', '')
+        filter_args = args[1:-1]
+    except ValueError:
+        print("Error: last argument must be a task ID (number).", file=sys.stderr)
+        return
+    
+    # Determine the query based on filter
+    if not filter_args:
+        query = '(and (todo) (not (done)))'
+    elif filter_args[0] == 'today':
+        query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
+    elif filter_args[0] == 'next':
+        query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+    elif filter_args[0] == 'week':
+        query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
     else:
-        git_commit_org(f"org-warrior: schedule {org_id} {date}")
-        print("✓ Scheduled")
+        query = build_query(filter_args)
+    
+    # Get the list of tasks
+    results = run_org_ql(query, select="full")
+    
+    if not results or (len(results) == 1 and not results[0]):
+        print("No tasks found for the given filter.", file=sys.stderr)
+        return
+    
+    if task_id < 1 or task_id > len(results):
+        print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
+        return
+    
+    # Parse the task to get file and line number
+    task = parse_result(results[task_id - 1])
+    filepath = task.get('file')
+    lineno = task.get('line')
+    
+    if not filepath or not lineno:
+        print("Error: could not determine task location.", file=sys.stderr)
+        return
+    
+    # Build elisp to open file, go to line, and schedule
+    elisp = f'''(progn
+      (find-file "{filepath}")
+      (goto-char (point-min))
+      (forward-line {lineno - 1})
+      (let ((d (format-time-string "%Y-%m-%d %H:%M" (org-read-date nil t "{date}"))))
+        (org-schedule nil d))
+      (save-buffer))'''
+    
+    cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
+    # Debug print
+    # print(f"Running command: {' '.join(cmd)}")
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"Error scheduling: {result.stderr}", file=sys.stderr)
+        return
+    
+    # git_commit_org(f"org-warrior: schedule {task.get('heading')} {date}")
+    print(f"✓ Scheduled task {task_id}: {task.get('heading')}")
+
+
+def cmd_deadline(args):
+    """Set a deadline for a task by filter and ID (e.g., org-warrior deadline "friday" today 1)."""
+    if len(args) < 2:
+        print("Usage: org-warrior deadline <DATE> [filter...] <task-id>", file=sys.stderr)
+        print("Example: org-warrior deadline \"friday\" today 1", file=sys.stderr)
+        print("Example: org-warrior deadline \"+7d\" +work 2", file=sys.stderr)
+        return
+    
+    # First argument is the date, last is task ID, middle are filters
+    try:
+        task_id = int(args[-1])
+        date = args[0].replace('"', '')
+        filter_args = args[1:-1]
+    except ValueError:
+        print("Error: last argument must be a task ID (number).", file=sys.stderr)
+        return
+    
+    # Determine the query based on filter
+    if not filter_args:
+        query = '(and (todo) (not (done)))'
+    elif filter_args[0] == 'today':
+        query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
+    elif filter_args[0] == 'next':
+        query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+    elif filter_args[0] == 'week':
+        query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
+    else:
+        query = build_query(filter_args)
+    
+    # Get the list of tasks
+    results = run_org_ql(query, select="full")
+    
+    if not results or (len(results) == 1 and not results[0]):
+        print("No tasks found for the given filter.", file=sys.stderr)
+        return
+    
+    if task_id < 1 or task_id > len(results):
+        print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
+        return
+    
+    # Parse the task to get file and line number
+    task = parse_result(results[task_id - 1])
+    filepath = task.get('file')
+    lineno = task.get('line')
+    
+    if not filepath or not lineno:
+        print("Error: could not determine task location.", file=sys.stderr)
+        return
+    
+    # Build elisp to open file, go to line, and set deadline
+    elisp = f'''(progn
+      (find-file "{filepath}")
+      (goto-char (point-min))
+      (forward-line {lineno - 1})
+      (let ((d (org-read-date nil nil "{date}")))
+        (org-deadline nil d))
+      (save-buffer))'''
+    
+    cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"Error setting deadline: {result.stderr}", file=sys.stderr)
+        return
+    
+    git_commit_org(f"org-warrior: deadline {task.get('heading')} {date}")
+    print(f"✓ Set deadline for task {task_id}: {task.get('heading')}")
 
 
 def cmd_jira_sync(args):
@@ -623,22 +739,27 @@ USAGE:
     org-warrior <command> [options]
 
 COMMANDS:
-    list [filters]    List tasks (default command)
+    list [filters]       List tasks (default command)
     show <ORG-ID>        Show details for a task by org ID (preferred)
-    task <id> [filters] Show details for a task by index
-    next              Show next actions
-    today             Tasks due/scheduled today
-    week              Tasks for the coming week
-    overdue           Overdue tasks
-    done              Recently completed tasks
-    projects          Active projects
-    stuck             Stuck projects (no NEXT actions)
-    waiting           Waiting tasks
-    tag <name>        Tasks with specific tag
-    priority <A|B|C>  Tasks by priority
-    search <pattern>  Search tasks by text
-    query <expr>      Run raw org-ql expression
-    start <filter> <id>  Clock in to a task (e.g., org-warrior start today 1)
+    task <id> [filters]  Show details for a task by index
+    next                 Show next actions
+    today                Tasks due/scheduled today
+    week                 Tasks for the coming week
+    overdue              Overdue tasks
+    done                 Recently completed tasks
+    projects             Active projects
+    stuck                Stuck projects (no NEXT actions)
+    waiting              Waiting tasks
+    tag <name>           Tasks with specific tag
+    priority <A|B|C>     Tasks by priority
+    search <pattern>     Search tasks by text
+    query <expr>         Run raw org-ql expression
+    start <date> [filter] <id>     Clock in to a task
+    schedule <date> [filter] <id>  Schedule a task
+    deadline <date> [filter] <id>  Set deadline for a task
+    add <title>          Add new TODO to inbox
+    set-state <ORG-ID> <STATE>     Set TODO state by org ID
+    jira-sync            Trigger org-jira sync
 
 FILTERS (for list command):
     +tag              Filter by tag
@@ -656,12 +777,14 @@ ENVIRONMENT:
     ORG_WARRIOR_SERVER  Emacs server name (default: edit)
 
 EXAMPLES:
-    org-warrior                     # List all open tasks
-    org-warrior today               # Today's tasks
-    org-warrior +work due:week      # Work tasks due this week
-    org-warrior search meeting      # Search for 'meeting'
+    org-warrior                        # List all open tasks
+    org-warrior today                  # Today's tasks
+    org-warrior +work due:week         # Work tasks due this week
+    org-warrior search meeting         # Search for 'meeting'
     org-warrior query '(todo "NEXT")'  # Raw org-ql query
-    org-warrior start today 1       # Clock in to first task from today
+    org-warrior start today 1          # Clock in to first task from today
+    org-warrior schedule "6pm" today 1 # Schedule first task from today for 6pm
+    org-warrior deadline "friday" +work 2  # Set deadline to friday for 2nd work task
 """
     print(help_text.strip())
 
@@ -690,8 +813,9 @@ def main():
         'search': cmd_search,
         'query': cmd_query,
         'start': cmd_start,
-        'jira-sync': cmd_jira_sync,
         'schedule': cmd_schedule,
+        'deadline': cmd_deadline,
+        'jira-sync': cmd_jira_sync,
         'set-state': cmd_set_state,
         'add': cmd_add,
     }
