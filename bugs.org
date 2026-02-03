@@ -1,0 +1,39 @@
+* BUG: org-warrior schedule mapping / "out of range" error
+:PROPERTIES:
+:reported: 2026-02-02
+:reporter: Beth (assistant)
+:END:
+
+Summary:
+
+org-warrior returned "Task ID 9 out of range (1-7)" during a batch of schedule commands and several tasks were scheduled at unexpected IDs or without explicit times. The behavior suggests the "today" filter used in the schedule command may map to a different, changing set of task indices or that the CLI's indexing differs between list/search and schedule invocations.
+
+Steps to reproduce:
+1. Run: org-warrior today and note the numbered list of tasks (e.g., 1..12 in my run).
+2. Immediately run multiple schedule commands referencing the numeric indices from the "today" output, for example:
+   ORGW=~/PersonalProjects/org-warrior/src/org-warrior
+   $ORGW schedule "2026-02-02 18:30" today 3
+   $ORGW schedule "2026-02-02 19:00" today 12
+   ... (batch several schedule calls separated by &&)
+3. Observe: one command may fail with "Task ID <n> out of range (1-<m>)" while earlier commands succeeded; after the batch, run $ORGW today and $ORGW list to inspect which tasks received SCH timestamps and which did not.
+
+Observed behavior (my run):
+- The CLI returned: "Task ID 9 out of range (1-7)" after scheduling most items successfully.
+- After running the batch, some tasks were scheduled with expected times, others were scheduled but under different Org IDs than expected (org-warrior's global list uses stable Org IDs, while the "today" listing used transient numeric indices). Some scheduled entries show only a date (no time) or were recorded under different task IDs.
+
+Expected behavior:
+- Numeric indices shown by "org-warrior today" should reliably map to the same tasks when used immediately in a subsequent "org-warrior schedule ... today <index>" call (or the CLI should accept stable Org IDs instead of numeric indices), or the CLI should return a clear error explaining index invalidation.
+
+Additional notes / hypothesis:
+- Possible causes: the "today" view returns a transient, filtered index (1..N) that is not guaranteed to match indices expected by the schedule subcommand; scheduling multiple tasks in sequence may change the filtered set and invalidate later indices.
+- Workarounds: use stable Org :ID: values (org-warrior show <ORG-ID>) when scheduling in scripts, or have schedule accept the Org-ID explicitly.
+
+Suggested fix / next actions:
+- Update documentation to clarify whether schedule <filter> <index> expects the filtered index or a global Org-ID.
+- Make schedule accept Org :ID: strings (preferable), or provide a flag like --stable-ids to use Org IDs.
+- Improve error messaging when an index is out of range to include the valid range and suggest using Org IDs.
+
+Attachments / logs:
+- Copy of the terminal session that produced the error is available in the user's org-warrior run history (ask Juan if they want the exact terminal transcript).
+
+-- Created by Beth (assistant) on 2026-02-02
