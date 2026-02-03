@@ -39,15 +39,15 @@ setup() {
 DEADLINE: $TODAY
 * TODO [#A] Finish report :work:
 SCHEDULED: $TODAY
-* NEXT Call dentist :health:
+* STRT Call dentist :health:
 * DONE Review PR :work:
 CLOSED: $CLOSED_RECENT
 * TODO [#B] Read book :personal:
-* WAITING Response from client :work:
-* PROJECT Build website :work:
-** NEXT Design homepage
+* WAIT Response from client :work:
+* TODO Build website :work:project:
+** STRT Design homepage
 ** TODO Implement backend
-* PROJECT Home renovation :home:
+* TODO Home renovation :home:project:
 ** TODO Paint walls
 * TODO [#C] Clean garage :home:
 DEADLINE: $OVERDUE
@@ -58,7 +58,7 @@ CLOSED: $CLOSED_OLD
 EOF
     mkdir -p "$TEST_DIR/sub"
     cat > "$TEST_DIR/sub/nested.org" << EOF
-* NEXT Nested action :nested:
+* STRT Nested action :nested:
 DEADLINE: $TODAY
 * TODO Nested todo :nested:
 EOF
@@ -74,7 +74,7 @@ assert_contains() {
     local expected="$2"
     local test_name="$3"
     
-    if echo "$output" | grep -q "$expected"; then
+    if echo "$output" | grep -q -- "$expected"; then
         echo -e "${GREEN}✓${NC} $test_name"
         ((PASSED++))
     else
@@ -224,7 +224,7 @@ test_tag_filter() {
 # Test: Raw query
 test_query() {
     local output
-    output=$("$ORG_WARRIOR" query '(todo "WAITING")' 2>&1)
+    output=$("$ORG_WARRIOR" query '(todo "WAIT")' 2>&1)
     assert_contains "$output" "Response from client" "raw query works"
     assert_count "$output" "1" "raw query returns correct count"
 }

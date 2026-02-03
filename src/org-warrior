@@ -419,7 +419,7 @@ def cmd_list(args):
 
 def cmd_next(args):
     """Show next actions (NEXT keyword or high priority TODO)."""
-    query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+    query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
     results = run_org_ql(query, select="full")
     print_results(results, "No next actions found.")
 
@@ -460,7 +460,7 @@ def cmd_done(args):
 
 def cmd_projects(args):
     """Show active projects."""
-    query = '(and (todo "PROJECT") (not (done)))'
+    query = '(and (tags "project") (not (done)) (not (ancestors (tags "project"))))'
     results = run_org_ql(query, select="full")
     print_results(results, "No active projects.")
 
@@ -499,14 +499,14 @@ def cmd_priority(args):
 
 def cmd_waiting(args):
     """Show waiting tasks."""
-    query = '(todo "WAITING")'
+    query = '(todo "WAIT")'
     results = run_org_ql(query, select="full")
     print_results(results, "No waiting tasks.")
 
 
 def cmd_stuck(args):
     """Show stuck projects (projects without NEXT actions)."""
-    query = '(and (todo "PROJECT") (not (done)) (not (descendants (todo "NEXT"))))'
+    query = '(and (tags "project") (not (done)) (not (ancestors (tags "project"))) (not (descendants (todo "STRT"))))'
     results = run_org_ql(query, select="full")
     print_results(results, "No stuck projects.")
 
@@ -543,7 +543,7 @@ def cmd_start(args):
     elif filter_args[0] == 'today':
         query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     elif filter_args[0] == 'next':
-        query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+        query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
     elif filter_args[0] == 'week':
         query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
     else:
@@ -598,7 +598,7 @@ def build_query(args):
         if arg.startswith('+'):
             conditions.append(f'(tags "{arg[1:]}")')
         elif arg.startswith('project:'):
-            conditions.append('(ancestors (todo "PROJECT"))')
+            conditions.append('(ancestors (tags "project"))')
         elif arg.startswith('pri:') or arg.startswith('priority:'):
             pri = arg.split(':')[1].upper()
             conditions.append(f'(priority "{pri}")')
@@ -771,7 +771,7 @@ def cmd_schedule(args):
     elif filter_args[0] == 'today':
         query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     elif filter_args[0] == 'next':
-        query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+        query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
     elif filter_args[0] == 'week':
         query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
     else:
@@ -880,7 +880,7 @@ def cmd_deadline(args):
     elif filter_args[0] == 'today':
         query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     elif filter_args[0] == 'next':
-        query = '(or (todo "NEXT") (and (todo "TODO") (priority "A")))'
+        query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
     elif filter_args[0] == 'week':
         query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
     else:
@@ -993,7 +993,7 @@ EXAMPLES:
     org-warrior +work due:week                    # Work tasks due this week
     org-warrior search meeting                    # Search for 'meeting'
     org-warrior show index 1 scheduled:today      # Show first task from today's scheduled tasks
-    org-warrior query '(todo "NEXT")'             # Raw org-ql query
+    org-warrior query '(todo "STRT")'             # Raw org-ql query
     org-warrior start today 1                     # Clock in to first task from today
     org-warrior schedule "6pm" today 1            # Schedule first task from today for 6pm
     org-warrior schedule "6pm" abc123def456       # Schedule task by Org ID
