@@ -9,6 +9,8 @@ import sys
 import os
 import re
 import shutil
+from datetime import datetime, date
+from typing import Optional, Tuple
 
 
 
@@ -32,6 +34,115 @@ ORG_FILES = os.environ.get("ORG_WARRIOR_FILES", "~/org")
 EMACS_CMD = os.environ.get("EMACS_CMD", "emacsclient")
 EMACS_SERVER = os.environ.get("ORG_WARRIOR_SERVER", "edit")
 EMACS_LOAD_PATH = os.environ.get("ORG_WARRIOR_LOAD_PATH", "")
+
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "\033[1m"
+ANSI_DIM = "\033[2m"
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_BLUE = "\033[34m"
+ANSI_MAGENTA = "\033[35m"
+ANSI_CYAN = "\033[36m"
+
+TODO_COLORS = {
+    "NEXT": ANSI_CYAN,
+    "TODO": ANSI_GREEN,
+    "WAITING": ANSI_MAGENTA,
+    "PROJECT": ANSI_BLUE,
+}
+
+PRIORITY_COLORS = {
+    "A": ANSI_RED,
+    "B": ANSI_YELLOW,
+    "C": ANSI_BLUE,
+}
+
+ORG_TS_RE = re.compile(r'(\d{4}-\d{2}-\d{2})(?:\s+\w+)?(?:\s+(\d{2}:\d{2}))?')
+USE_COLOR = False
+
+
+def supports_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def set_color_mode(enabled: bool = True) -> None:
+    global USE_COLOR
+    USE_COLOR = enabled and supports_color()
+
+
+def colorize(text: str, color: Optional[str], *, bold: bool = False, dim: bool = False) -> str:
+    if not USE_COLOR:
+        return text
+    prefix = ""
+    if bold:
+        prefix += ANSI_BOLD
+    if dim:
+        prefix += ANSI_DIM
+    if color:
+        prefix += color
+    if not prefix:
+        return text
+    return f"{prefix}{text}{ANSI_RESET}"
+
+
+def parse_org_timestamp(value: Optional[str]) -> Tuple[Optional[date], Optional[str]]:
+    if not value:
+        return None, None
+    match = ORG_TS_RE.search(value)
+    if not match:
+        return None, None
+    date_str, time_str = match.groups()
+    try:
+        parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None, time_str
+    return parsed_date, time_str
+
+
+def date_status(value: Optional[date]) -> Optional[str]:
+    if not value:
+        return None
+    today = date.today()
+    if value < today:
+        return "overdue"
+    if value == today:
+        return "today"
+    return "future"
+
+
+def date_color(kind: str, status: Optional[str]) -> Tuple[Optional[str], bool]:
+    if not status:
+        return None, False
+    if kind == "DUE":
+        if status == "overdue":
+            return ANSI_RED, True
+        if status == "today":
+            return ANSI_YELLOW, True
+        return ANSI_GREEN, False
+    if status == "overdue":
+        return ANSI_RED, False
+    if status == "today":
+        return ANSI_CYAN, False
+    return ANSI_BLUE, False
+
+
+def format_date_label(kind: str, value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    parsed_date, _ = parse_org_timestamp(value)
+    status = date_status(parsed_date)
+    color, bold = date_color(kind, status)
+    return colorize(f"{kind}:{value}", color, bold=bold)
+
+
+def format_date_value(kind: str, value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    parsed_date, _ = parse_org_timestamp(value)
+    status = date_status(parsed_date)
+    color, bold = date_color(kind, status)
+    return colorize(value, color, bold=bold)
 
 
 def get_doom_load_paths():
@@ -132,7 +243,8 @@ def run_org_ql(query, files=None, select="heading"):
                               (org-entry-get nil "DEADLINE")
                               (org-entry-get nil "SCHEDULED")
                               (buffer-file-name)
-                              (line-number-at-pos))"""
+                              (line-number-at-pos)
+                              (org-entry-get nil "ID"))"""
     else:
         select_expr = select
 
@@ -181,14 +293,14 @@ def run_org_ql(query, files=None, select="heading"):
 def parse_result(line):
     """Parse a result line from org-ql output."""
     if line.startswith('('):
-        # Format: ("heading" "TODO" "A" deadline scheduled "filepath" lineno)
-        # Deadline/scheduled can be nil or "<date>"
+        # Format: ("heading" "TODO" "A" deadline scheduled "filepath" lineno "ID")
+        # Deadline/scheduled/ID can be nil or "<date>"/"string"
         match = re.match(
-            r'\("([^"]*)" (nil|"[^"]*") "([^"]*)" (nil|"[^"]*") (nil|"[^"]*") "([^"]*)" (\d+)\)',
+            r'\("([^"]*)" (nil|"[^"]*") "([^"]*)" (nil|"[^"]*") (nil|"[^"]*") "([^"]*)" (\d+) (nil|"[^"]*")\)',
             line
         )
         if match:
-            heading, todo, priority, deadline, scheduled, filepath, lineno = match.groups()
+            heading, todo, priority, deadline, scheduled, filepath, lineno, org_id = match.groups()
             return {
                 'heading': heading,
                 'todo': None if todo == 'nil' else todo.strip('"'),
@@ -196,29 +308,43 @@ def parse_result(line):
                 'deadline': deadline.strip('"') if deadline != 'nil' else None,
                 'scheduled': scheduled.strip('"') if scheduled != 'nil' else None,
                 'file': filepath,
-                'line': int(lineno)
+                'line': int(lineno),
+                'id': org_id.strip('"') if org_id != 'nil' else None
             }
     return {'heading': line}
 
 
-def format_task(task, idx=None):
+def format_task(task, idx=None, show_ids=False):
     """Format a task for display."""
     parts = []
     if idx is not None:
-        parts.append(f"{idx:3d}")
+        parts.append(colorize(f"{idx:3d}", None, dim=True))
     
     if task.get('todo'):
-        parts.append(f"[{task['todo']}]")
+        todo = task['todo']
+        todo_color = TODO_COLORS.get(todo)
+        parts.append(colorize(f"[{todo}]", todo_color, bold=True))
     
     if task.get('priority'):
-        parts.append(f"({task['priority']})")
+        priority = task['priority']
+        pri_color = PRIORITY_COLORS.get(priority)
+        parts.append(colorize(f"({priority})", pri_color, bold=True))
     
-    parts.append(task.get('heading', ''))
+    parts.append(colorize(task.get('heading', ''), None, bold=True))
     
-    if task.get('deadline'):
-        parts.append(f"DUE:{task['deadline']}")
-    elif task.get('scheduled'):
-        parts.append(f"SCH:{task['scheduled']}")
+    deadline = format_date_label("DUE", task.get('deadline'))
+    scheduled = format_date_label("SCH", task.get('scheduled'))
+    if deadline:
+        parts.append(deadline)
+    if scheduled and not deadline:
+        parts.append(scheduled)
+    
+    if show_ids:
+        org_id = task.get('id')
+        if org_id:
+            parts.append(colorize(f"ID:{org_id}", None, dim=True))
+        else:
+            parts.append(colorize("ID:", None, dim=True))
     
     return ' '.join(parts)
 
@@ -232,22 +358,22 @@ def format_task_detail(task, idx=None):
     todo = task.get('todo')
     priority = task.get('priority')
     if todo:
-        heading = f"[{todo}] {heading}"
+        heading = f"{colorize(f'[{todo}]', TODO_COLORS.get(todo), bold=True)} {heading}"
     if priority:
-        heading = f"({priority}) {heading}"
-    lines.append(f"  {heading}")
+        heading = f"{colorize(f'({priority})', PRIORITY_COLORS.get(priority), bold=True)} {heading}"
+    lines.append(f"  {colorize(heading, None, bold=True)}")
     if task.get('deadline'):
-        lines.append(f"  Deadline: {task['deadline']}")
+        lines.append(f"  Deadline: {format_date_value('DUE', task['deadline'])}")
     if task.get('scheduled'):
-        lines.append(f"  Scheduled: {task['scheduled']}")
+        lines.append(f"  Scheduled: {format_date_value('SCH', task['scheduled'])}")
     file_info = task.get('file')
     line_no = task.get('line')
     if file_info and line_no:
-        lines.append(f"  Location: {file_info}:{line_no}")
+        lines.append(f"  Location: {colorize(f'{file_info}:{line_no}', None, dim=True)}")
     return "\n".join(lines)
 
 
-def print_results(results, empty_msg="No tasks found."):
+def print_results(results, empty_msg="No tasks found.", show_ids=False):
     """Print formatted results."""
     if not results or (len(results) == 1 and not results[0]):
         print(empty_msg)
@@ -255,7 +381,7 @@ def print_results(results, empty_msg="No tasks found."):
     
     for i, line in enumerate(results, 1):
         task = parse_result(line)
-        print(format_task(task, i))
+        print(format_task(task, i, show_ids=show_ids))
     
     print(f"\n{len(results)} task(s)")
     return len(results)
@@ -282,9 +408,13 @@ def cmd_task(args):
 
 def cmd_list(args):
     """List tasks matching filters."""
+    show_ids = False
+    if args and args[0] in ['--ids', '--show-ids']:
+        show_ids = True
+        args = args[1:]
     query = build_query(args)
     results = run_org_ql(query, select="full")
-    print_results(results)
+    print_results(results, show_ids=show_ids)
 
 
 def cmd_next(args):
@@ -296,11 +426,15 @@ def cmd_next(args):
 
 def cmd_today(args):
     """Show tasks due/scheduled up to today (overdue + today)."""
+    show_ids = False
+    if args and args[0] in ['--ids', '--show-ids']:
+        show_ids = True
+        args = args[1:]
     # Include overdue deadlines/scheduled items as well as items happening today.
     # Exclude DONE/CANCELLED via (not (done)).
     query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     results = run_org_ql(query, select="full")
-    print_results(results, "No tasks for today.")
+    print_results(results, "No tasks for today.", show_ids=show_ids)
 
 
 def cmd_week(args):
@@ -582,22 +716,55 @@ def cmd_set_state(args):
 
 
 def cmd_schedule(args):
-    """Schedule a task by filter and ID (e.g., org-warrior schedule "6pm" today 1)."""
+    """Schedule a task by filter and ID (e.g., org-warrior schedule "6pm" today 1) or by Org ID."""
     if len(args) < 2:
-        print("Usage: org-warrior schedule <DATE> [filter...] <task-id>", file=sys.stderr)
+        print("Usage: org-warrior schedule <DATE> [filter...] <task-index|org-id>", file=sys.stderr)
         print("Example: org-warrior schedule \"6pm\" today 1", file=sys.stderr)
         print("Example: org-warrior schedule \"+1d\" +work 2", file=sys.stderr)
+        print("Example: org-warrior schedule \"6pm\" abc123def456", file=sys.stderr)
         return
     
-    # First argument is the date, last is task ID, middle are filters
+    date = args[0].replace('"', '')
+    
+    # Check if last argument is an Org ID (not an integer)
     try:
         task_id = int(args[-1])
-        date = args[0].replace('"', '')
+        is_org_id = False
         filter_args = args[1:-1]
     except ValueError:
-        print("Error: last argument must be a task ID (number).", file=sys.stderr)
+        # Last argument is not an int, treat as Org ID
+        org_id = args[-1]
+        is_org_id = True
+    
+    if is_org_id:
+        # Schedule by Org ID directly using org-id-find
+        elisp = f'''(progn
+          (require 'org)
+          (require 'org-id)
+          (let ((m (org-id-find "{org_id}" t)))
+            (if (not m)
+                (princ "NOT_FOUND")
+              (with-current-buffer (marker-buffer m)
+                (goto-char m)
+                (let ((d (format-time-string "%Y-%m-%d %H:%M" (org-read-date nil t "{date}"))))
+                  (org-schedule nil d))
+                (save-buffer)
+                (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
+        
+        try:
+            heading = emacs_eval(elisp).strip()
+        except RuntimeError as e:
+            print(f"Error scheduling: {e}", file=sys.stderr)
+            return
+        
+        if heading == 'NOT_FOUND':
+            print(f"No entry found for ID {org_id}", file=sys.stderr)
+            return
+        
+        print(f"✓ Scheduled task: {heading}")
         return
     
+    # Original numeric index path
     # Determine the query based on filter
     if not filter_args:
         query = '(and (todo) (not (done)))'
@@ -619,6 +786,9 @@ def cmd_schedule(args):
     
     if task_id < 1 or task_id > len(results):
         print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
+        print("Note: Filtered indices may change after scheduling tasks.", file=sys.stderr)
+        print("Consider using Org IDs for stable task references.", file=sys.stderr)
+        print("Use 'org-warrior list --ids' or 'org-warrior today --ids' to see task IDs.", file=sys.stderr)
         return
     
     # Parse the task to get file and line number
@@ -654,22 +824,56 @@ def cmd_schedule(args):
 
 
 def cmd_deadline(args):
-    """Set a deadline for a task by filter and ID (e.g., org-warrior deadline "friday" today 1)."""
+    """Set a deadline for a task by filter and ID or by Org ID."""
     if len(args) < 2:
-        print("Usage: org-warrior deadline <DATE> [filter...] <task-id>", file=sys.stderr)
+        print("Usage: org-warrior deadline <DATE> [filter...] <task-index|org-id>", file=sys.stderr)
         print("Example: org-warrior deadline \"friday\" today 1", file=sys.stderr)
         print("Example: org-warrior deadline \"+7d\" +work 2", file=sys.stderr)
+        print("Example: org-warrior deadline \"friday\" abc123def456", file=sys.stderr)
         return
     
-    # First argument is the date, last is task ID, middle are filters
+    date = args[0].replace('"', '')
+    
+    # Check if last argument is an Org ID (not an integer)
     try:
         task_id = int(args[-1])
-        date = args[0].replace('"', '')
+        is_org_id = False
         filter_args = args[1:-1]
     except ValueError:
-        print("Error: last argument must be a task ID (number).", file=sys.stderr)
+        # Last argument is not an int, treat as Org ID
+        org_id = args[-1]
+        is_org_id = True
+    
+    if is_org_id:
+        # Set deadline by Org ID directly using org-id-find
+        elisp = f'''(progn
+          (require 'org)
+          (require 'org-id)
+          (let ((m (org-id-find "{org_id}" t)))
+            (if (not m)
+                (princ "NOT_FOUND")
+              (with-current-buffer (marker-buffer m)
+                (goto-char m)
+                (let ((d (org-read-date nil nil "{date}")))
+                  (org-deadline nil d))
+                (save-buffer)
+                (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
+        
+        try:
+            heading = emacs_eval(elisp).strip()
+        except RuntimeError as e:
+            print(f"Error setting deadline: {e}", file=sys.stderr)
+            return
+        
+        if heading == 'NOT_FOUND':
+            print(f"No entry found for ID {org_id}", file=sys.stderr)
+            return
+        
+        git_commit_org(f"org-warrior: deadline {heading} {date}")
+        print(f"✓ Set deadline for task: {heading}")
         return
     
+    # Original numeric index path
     # Determine the query based on filter
     if not filter_args:
         query = '(and (todo) (not (done)))'
@@ -691,6 +895,9 @@ def cmd_deadline(args):
     
     if task_id < 1 or task_id > len(results):
         print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
+        print("Note: Filtered indices may change after setting deadlines.", file=sys.stderr)
+        print("Consider using Org IDs for stable task references.", file=sys.stderr)
+        print("Use 'org-warrior list --ids' or 'org-warrior today --ids' to see task IDs.", file=sys.stderr)
         return
     
     # Parse the task to get file and line number
@@ -739,11 +946,11 @@ USAGE:
     org-warrior <command> [options]
 
 COMMANDS:
-    list [filters]       List tasks (default command)
+    list [--ids] [filters]       List tasks (default command)
     show <ORG-ID>        Show details for a task by org ID (preferred)
     task <id> [filters]  Show details for a task by index
     next                 Show next actions
-    today                Tasks due/scheduled today
+    today [--ids]        Tasks due/scheduled today
     week                 Tasks for the coming week
     overdue              Overdue tasks
     done                 Recently completed tasks
@@ -755,11 +962,15 @@ COMMANDS:
     search <pattern>     Search tasks by text
     query <expr>         Run raw org-ql expression
     start <date> [filter] <id>     Clock in to a task
-    schedule <date> [filter] <id>  Schedule a task
-    deadline <date> [filter] <id>  Set deadline for a task
+    schedule <date> [filter] <id|org-id>  Schedule a task
+    deadline <date> [filter] <id|org-id>  Set deadline for a task
     add <title>          Add new TODO to inbox
     set-state <ORG-ID> <STATE>     Set TODO state by org ID
     jira-sync            Trigger org-jira sync
+
+OPTIONS:
+    --no-color          Disable colored output (also supports NO_COLOR)
+    --ids, --show-ids   Show Org IDs in list/today commands
 
 FILTERS (for list command):
     +tag              Filter by tag
@@ -778,13 +989,14 @@ ENVIRONMENT:
 
 EXAMPLES:
     org-warrior                                   # List all open tasks
-    org-warrior today                             # Today's tasks
+    org-warrior today --ids                       # Today's tasks with Org IDs
     org-warrior +work due:week                    # Work tasks due this week
     org-warrior search meeting                    # Search for 'meeting'
     org-warrior show index 1 scheduled:today      # Show first task from today's scheduled tasks
     org-warrior query '(todo "NEXT")'             # Raw org-ql query
     org-warrior start today 1                     # Clock in to first task from today
     org-warrior schedule "6pm" today 1            # Schedule first task from today for 6pm
+    org-warrior schedule "6pm" abc123def456       # Schedule task by Org ID
     org-warrior deadline "friday" +work 2         # Set deadline to friday for 2nd work task
 """
     print(help_text.strip())
@@ -796,6 +1008,12 @@ def main():
     if not args or args[0] in ['-h', '--help', 'help']:
         print_help()
         return
+
+    if args[0] == '--no-color':
+        set_color_mode(False)
+        args = args[1:]
+    else:
+        set_color_mode(True)
     
     commands = {
         'list': cmd_list,

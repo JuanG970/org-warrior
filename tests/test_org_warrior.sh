@@ -229,6 +229,30 @@ test_query() {
     assert_count "$output" "1" "raw query returns correct count"
 }
 
+# Test: --ids flag with list
+test_list_with_ids() {
+    local output
+    output=$("$ORG_WARRIOR" list --ids 2>&1)
+    assert_contains "$output" "ID:" "list --ids shows ID labels"
+}
+
+# Test: --ids flag with today
+test_today_with_ids() {
+    local output
+    output=$("$ORG_WARRIOR" today --ids 2>&1)
+    assert_contains "$output" "ID:" "today --ids shows ID labels"
+}
+
+# Test: Improved error message for out-of-range
+test_out_of_range_error() {
+    local output
+    output=$("$ORG_WARRIOR" schedule "6pm" today 999 2>&1)
+    assert_contains "$output" "out of range" "error shows out of range"
+    assert_contains "$output" "Filtered indices may change" "error mentions filtered indices"
+    assert_contains "$output" "Org IDs" "error mentions Org IDs"
+    assert_contains "$output" "--ids" "error mentions --ids flag"
+}
+
 # Main
 main() {
     echo "Setting up test environment..."
@@ -253,6 +277,9 @@ main() {
     test_search
     test_tag_filter
     test_query
+    test_list_with_ids
+    test_today_with_ids
+    test_out_of_range_error
     
     echo ""
     echo "========================================="
