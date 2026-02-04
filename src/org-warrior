@@ -9,6 +9,10 @@ import sys
 import os
 import re
 import shutil
+import hashlib
+import json
+import tempfile
+import uuid as _uuid
 from datetime import datetime, date
 from typing import Optional, Tuple
 
@@ -61,6 +65,18 @@ PRIORITY_COLORS = {
 ORG_TS_RE = re.compile(r'(\d{4}-\d{2}-\d{2})(?:\s+\w+)?(?:\s+(\d{2}:\d{2}))?')
 USE_COLOR = False
 
+HANDLES_CACHE = os.path.expanduser("~/.org-warrior/handles.json")
+WORDLIST_PATHS = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd(), "wordlist.txt"),
+    os.path.expanduser("~/.org-warrior/wordlist.txt"),
+]
+WORDLIST_DEFAULT = [
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+    "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+]
+HANDLE_WORDS = 3
+HANDLE_VERSION = 1
+
 
 def supports_color() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
@@ -84,6 +100,153 @@ def colorize(text: str, color: Optional[str], *, bold: bool = False, dim: bool =
     if not prefix:
         return text
     return f"{prefix}{text}{ANSI_RESET}"
+
+
+def load_wordlist() -> list:
+    for path in WORDLIST_PATHS:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                words = [w.strip().lower() for w in fh if w.strip()]
+            if words and (len(words) & (len(words) - 1) == 0):
+                return words
+            print(f"Warning: wordlist length must be power of two: {path}", file=sys.stderr)
+    print("Warning: using fallback wordlist; handles may collide.", file=sys.stderr)
+    return WORDLIST_DEFAULT
+
+
+def _empty_handle_cache() -> dict:
+    return {"version": HANDLE_VERSION, "by_handle": {}, "by_uuid": {}}
+
+
+def load_handle_cache() -> dict:
+    if not os.path.isfile(HANDLES_CACHE):
+        return _empty_handle_cache()
+    try:
+        with open(HANDLES_CACHE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return _empty_handle_cache()
+        if "by_handle" not in data or "by_uuid" not in data:
+            return _empty_handle_cache()
+        return data
+    except (OSError, json.JSONDecodeError):
+        return _empty_handle_cache()
+
+
+def save_handle_cache(cache: dict) -> None:
+    os.makedirs(os.path.dirname(HANDLES_CACHE), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="handles-", dir=os.path.dirname(HANDLES_CACHE))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, indent=2, sort_keys=True)
+        os.replace(tmp_path, HANDLES_CACHE)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        _uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _word_indices_from_hash(hbytes: bytes, word_count: int) -> list:
+    bits = int.from_bytes(hbytes, "big")
+    word_bits = word_count.bit_length() - 1
+    mask = (1 << word_bits) - 1
+    indices = []
+    for i in range(HANDLE_WORDS):
+        shift = i * word_bits
+        indices.append((bits >> shift) & mask)
+    return indices
+
+
+def _handle_from_uuid(uuid_str: str, wordlist: list) -> str:
+    hbytes = hashlib.sha256(uuid_str.encode("utf-8")).digest()
+    indices = _word_indices_from_hash(hbytes, len(wordlist))
+    return "-".join(wordlist[i % len(wordlist)] for i in indices)
+
+
+def ensure_handle_for_uuid(uuid_str: str, cache: dict, wordlist: list) -> Tuple[str, bool]:
+    existing = cache["by_uuid"].get(uuid_str)
+    if existing:
+        return existing, False
+    base_handle = _handle_from_uuid(uuid_str, wordlist)
+    handle = base_handle
+    counter = 1
+    while handle in cache["by_handle"] and cache["by_handle"][handle] != uuid_str:
+        handle = f"{base_handle}-{counter}"
+        counter += 1
+    cache["by_uuid"][uuid_str] = handle
+    cache["by_handle"][handle] = uuid_str
+    return handle, True
+
+
+def resolve_id_token(token: str, cache: dict) -> Tuple[Optional[str], Optional[list]]:
+    normalized = token.strip().lower()
+    if normalized in cache["by_handle"]:
+        return cache["by_handle"][normalized], None
+    matches = [h for h in cache["by_handle"] if h.startswith(normalized)]
+    if len(matches) == 1:
+        return cache["by_handle"][matches[0]], None
+    if len(matches) > 1:
+        return None, sorted(matches)
+    if _is_uuid(normalized) or any(ch.isdigit() for ch in normalized):
+        return normalized, None
+    return None, None
+
+
+def ensure_handles_for_results(results: list) -> Tuple[dict, list, bool]:
+    cache = load_handle_cache()
+    wordlist = load_wordlist()
+    updated = False
+    tasks = []
+    for line in results:
+        task = parse_result(line)
+        org_id = task.get("id")
+        if org_id:
+            handle, created = ensure_handle_for_uuid(org_id, cache, wordlist)
+            task["handle"] = handle
+            updated = updated or created
+        tasks.append(task)
+    return cache, tasks, updated
+
+
+def batch_assign_handles(create_missing_ids: bool = True) -> None:
+    create_flag = "t" if create_missing_ids else "nil"
+    elisp = f"""(progn
+  (require 'org)
+  (require 'org-id)
+  (let ((out ""))
+    (dolist (f (org-agenda-files))
+      (with-current-buffer (find-file-noselect f)
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward org-heading-regexp nil t)
+            (org-back-to-heading t)
+            (when (or {create_flag} (org-entry-get nil "ID"))
+              (unless (org-entry-get nil "ID")
+                (org-id-get-create))
+              (let ((id (org-entry-get nil "ID")))
+                (when id
+                  (setq out (concat out id "\\n")))))))
+        (save-buffer)))
+    (princ out)))"""
+    output = emacs_eval_with_agenda(elisp, timeout=60)
+    cache = load_handle_cache()
+    wordlist = load_wordlist()
+    updated = False
+    for line in output.splitlines():
+        org_id = line.strip().strip('"')
+        if org_id:
+            _, created = ensure_handle_for_uuid(org_id, cache, wordlist)
+            updated = updated or created
+    if updated:
+        save_handle_cache(cache)
+    print(f"Handles cached: {len(cache['by_uuid'])}")
 
 
 def parse_org_timestamp(value: Optional[str]) -> Tuple[Optional[date], Optional[str]]:
@@ -230,6 +393,25 @@ def build_agenda_files_eval(files_spec):
     return f"(setq org-agenda-files '({file_list}))"
 
 
+def emacs_eval_with_agenda(elisp: str, timeout: int = 15) -> str:
+    """Evaluate ELisp with org-agenda-files set."""
+    load_paths = build_load_path_elisp()
+    agenda_files_eval = build_agenda_files_eval(ORG_FILES)
+    if not agenda_files_eval:
+        raise RuntimeError("no org files found")
+    cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", f"(progn {load_paths} {agenda_files_eval} {elisp})"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('emacsclient timed out (Emacs may be busy or waiting for input)')
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or '').strip() or 'emacsclient eval failed')
+    out = (r.stdout or '').strip()
+    if out.startswith('"') and out.endswith('"'):
+        out = out[1:-1]
+    return out.replace('\\n', '\n').replace('\\"', '"')
+
+
 def run_org_ql(query, files=None, select="heading"):
     """Run an org-ql query via Emacs batch mode and return results."""
     files = files or ORG_FILES
@@ -314,12 +496,17 @@ def parse_result(line):
     return {'heading': line}
 
 
-def format_task(task, idx=None, show_ids=False):
+def format_task(task, idx=None, show_ids=False, show_handles=True):
     """Format a task for display."""
     parts = []
     if idx is not None:
         parts.append(colorize(f"{idx:3d}", None, dim=True))
     
+    if show_handles:
+        handle = task.get("handle")
+        if handle:
+            parts.append(colorize(handle, None, dim=True))
+
     if task.get('todo'):
         todo = task['todo']
         todo_color = TODO_COLORS.get(todo)
@@ -370,18 +557,25 @@ def format_task_detail(task, idx=None):
     line_no = task.get('line')
     if file_info and line_no:
         lines.append(f"  Location: {colorize(f'{file_info}:{line_no}', None, dim=True)}")
+    handle = task.get("handle")
+    if handle:
+        lines.append(f"  Handle: {handle}")
+    if task.get("id"):
+        lines.append(f"  ID: {task['id']}")
     return "\n".join(lines)
 
 
-def print_results(results, empty_msg="No tasks found.", show_ids=False):
+def print_results(results, empty_msg="No tasks found.", show_ids=False, show_handles=True):
     """Print formatted results."""
     if not results or (len(results) == 1 and not results[0]):
         print(empty_msg)
         return 0
-    
-    for i, line in enumerate(results, 1):
-        task = parse_result(line)
-        print(format_task(task, i, show_ids=show_ids))
+
+    cache, tasks, updated = ensure_handles_for_results(results) if show_handles else (None, [parse_result(l) for l in results], False)
+    if updated:
+        save_handle_cache(cache)
+    for i, task in enumerate(tasks, 1):
+        print(format_task(task, i, show_ids=show_ids, show_handles=show_handles))
     
     print(f"\n{len(results)} task(s)")
     return len(results)
@@ -402,19 +596,25 @@ def cmd_task(args):
     if idx < 1 or idx > len(results):
         print(f"Task id {idx} out of range (1-{len(results)}).", file=sys.stderr)
         return
-    task = parse_result(results[idx - 1])
-    print(format_task_detail(task, idx))
+    cache, tasks, updated = ensure_handles_for_results([results[idx - 1]])
+    if updated:
+        save_handle_cache(cache)
+    print(format_task_detail(tasks[0], idx))
 
 
 def cmd_list(args):
     """List tasks matching filters."""
     show_ids = False
+    show_handles = True
     if args and args[0] in ['--ids', '--show-ids']:
         show_ids = True
         args = args[1:]
+    if args and args[0] in ['--no-handles']:
+        show_handles = False
+        args = args[1:]
     query = build_query(args)
     results = run_org_ql(query, select="full")
-    print_results(results, show_ids=show_ids)
+    print_results(results, show_ids=show_ids, show_handles=show_handles)
 
 
 def cmd_next(args):
@@ -427,14 +627,18 @@ def cmd_next(args):
 def cmd_today(args):
     """Show tasks due/scheduled up to today (overdue + today)."""
     show_ids = False
+    show_handles = True
     if args and args[0] in ['--ids', '--show-ids']:
         show_ids = True
+        args = args[1:]
+    if args and args[0] in ['--no-handles']:
+        show_handles = False
         args = args[1:]
     # Include overdue deadlines/scheduled items as well as items happening today.
     # Exclude DONE/CANCELLED via (not (done)).
     query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     results = run_org_ql(query, select="full")
-    print_results(results, "No tasks for today.", show_ids=show_ids)
+    print_results(results, "No tasks for today.", show_ids=show_ids, show_handles=show_handles)
 
 
 def cmd_week(args):
@@ -644,19 +848,32 @@ def emacs_eval(elisp: str) -> str:
 def cmd_show(args):
     """Show a task by Org ID (preferred) or by list index (fallback)."""
     if not args:
-        print("Usage: org-warrior show <ORG-ID> | show index <n> [filters]", file=sys.stderr)
+        print("Usage: org-warrior show <HANDLE|ORG-ID> | show index <n> [filters]", file=sys.stderr)
         return
     if args[0] == 'index':
         return cmd_task(args[1:])
     org_id = args[0]
+    cache = load_handle_cache()
+    resolved, candidates = resolve_id_token(org_id, cache)
+    if candidates:
+        print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
+        for cand in candidates:
+            print(f"  {cand}", file=sys.stderr)
+        return
+    if not resolved:
+        print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
+        return
+    org_id = resolved
     # org-ql property query (fast, avoids org-id global scan)
     query = f'(property "ID" "{org_id}")'
     results = run_org_ql(query, select="full")
     if not results or (len(results) == 1 and not results[0]):
         print(f"No entry found for ID {org_id}")
         return
-    task = parse_result(results[0])
-    print(format_task_detail(task))
+    cache, tasks, updated = ensure_handles_for_results([results[0]])
+    if updated:
+        save_handle_cache(cache)
+    print(format_task_detail(tasks[0]))
 
 
 
@@ -685,16 +902,31 @@ def cmd_add(args):
           (save-buffer)
           (princ (org-id-get)))))"""
     new_id = emacs_eval(elisp).strip()
+    cache = load_handle_cache()
+    wordlist = load_wordlist()
+    handle, created = ensure_handle_for_uuid(new_id, cache, wordlist)
+    if created:
+        save_handle_cache(cache)
     git_commit_org(f"org-warrior: add {new_id}")
-    print(f"Created: {new_id}")
+    print(f"Created: {handle} (ID: {new_id})")
 
 
 def cmd_set_state(args):
     """Set TODO state for an entry by Org ID."""
     if len(args) < 2:
-        print("Usage: org-warrior set-state <ORG-ID> <STATE>", file=sys.stderr)
+        print("Usage: org-warrior set-state <HANDLE|ORG-ID> <STATE>", file=sys.stderr)
         return
-    org_id, state = args[0], args[1]
+    cache = load_handle_cache()
+    resolved, candidates = resolve_id_token(args[0], cache)
+    if candidates:
+        print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
+        for cand in candidates:
+            print(f"  {cand}", file=sys.stderr)
+        return
+    if not resolved:
+        print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
+        return
+    org_id, state = resolved, args[1]
     state = state.replace('"', '')
     elisp = rf"""(progn
       (require 'org)
@@ -718,7 +950,7 @@ def cmd_set_state(args):
 def cmd_schedule(args):
     """Schedule a task by filter and ID (e.g., org-warrior schedule "6pm" today 1) or by Org ID."""
     if len(args) < 2:
-        print("Usage: org-warrior schedule <DATE> [filter...] <task-index|org-id>", file=sys.stderr)
+        print("Usage: org-warrior schedule <DATE> [filter...] <task-index|handle|org-id>", file=sys.stderr)
         print("Example: org-warrior schedule \"6pm\" today 1", file=sys.stderr)
         print("Example: org-warrior schedule \"+1d\" +work 2", file=sys.stderr)
         print("Example: org-warrior schedule \"6pm\" abc123def456", file=sys.stderr)
@@ -733,7 +965,17 @@ def cmd_schedule(args):
         filter_args = args[1:-1]
     except ValueError:
         # Last argument is not an int, treat as Org ID
-        org_id = args[-1]
+        cache = load_handle_cache()
+        resolved, candidates = resolve_id_token(args[-1], cache)
+        if candidates:
+            print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
+            for cand in candidates:
+                print(f"  {cand}", file=sys.stderr)
+            return
+        if not resolved:
+            print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
+            return
+        org_id = resolved
         is_org_id = True
     
     if is_org_id:
@@ -826,7 +1068,7 @@ def cmd_schedule(args):
 def cmd_deadline(args):
     """Set a deadline for a task by filter and ID or by Org ID."""
     if len(args) < 2:
-        print("Usage: org-warrior deadline <DATE> [filter...] <task-index|org-id>", file=sys.stderr)
+        print("Usage: org-warrior deadline <DATE> [filter...] <task-index|handle|org-id>", file=sys.stderr)
         print("Example: org-warrior deadline \"friday\" today 1", file=sys.stderr)
         print("Example: org-warrior deadline \"+7d\" +work 2", file=sys.stderr)
         print("Example: org-warrior deadline \"friday\" abc123def456", file=sys.stderr)
@@ -841,7 +1083,17 @@ def cmd_deadline(args):
         filter_args = args[1:-1]
     except ValueError:
         # Last argument is not an int, treat as Org ID
-        org_id = args[-1]
+        cache = load_handle_cache()
+        resolved, candidates = resolve_id_token(args[-1], cache)
+        if candidates:
+            print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
+            for cand in candidates:
+                print(f"  {cand}", file=sys.stderr)
+            return
+        if not resolved:
+            print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
+            return
+        org_id = resolved
         is_org_id = True
     
     if is_org_id:
@@ -937,6 +1189,14 @@ def cmd_jira_sync(args):
     print("✓ Jira sync triggered" if out == 'OK' else out)
 
 
+def cmd_handles_assign(args):
+    """Assign Org IDs to legacy headings and populate handle cache."""
+    if args:
+        print("Usage: org-warrior handles-assign", file=sys.stderr)
+        return
+    batch_assign_handles(create_missing_ids=True)
+
+
 def print_help():
     """Print usage help."""
     help_text = """
@@ -946,11 +1206,11 @@ USAGE:
     org-warrior <command> [options]
 
 COMMANDS:
-    list [--ids] [filters]       List tasks (default command)
-    show <ORG-ID>        Show details for a task by org ID (preferred)
+    list [--ids] [--no-handles] [filters]       List tasks (default command)
+    show <HANDLE|ORG-ID>        Show details for a task by handle or org ID
     task <id> [filters]  Show details for a task by index
     next                 Show next actions
-    today [--ids]        Tasks due/scheduled today
+    today [--ids] [--no-handles]        Tasks due/scheduled today
     week                 Tasks for the coming week
     overdue              Overdue tasks
     done                 Recently completed tasks
@@ -962,15 +1222,17 @@ COMMANDS:
     search <pattern>     Search tasks by text
     query <expr>         Run raw org-ql expression
     start <date> [filter] <id>     Clock in to a task
-    schedule <date> [filter] <id|org-id>  Schedule a task
-    deadline <date> [filter] <id|org-id>  Set deadline for a task
+    schedule <date> [filter] <id|handle|org-id>  Schedule a task
+    deadline <date> [filter] <id|handle|org-id>  Set deadline for a task
     add <title>          Add new TODO to inbox
-    set-state <ORG-ID> <STATE>     Set TODO state by org ID
+    set-state <HANDLE|ORG-ID> <STATE>     Set TODO state by handle or org ID
+    handles-assign      Ensure Org IDs and cache handles for existing tasks
     jira-sync            Trigger org-jira sync
 
 OPTIONS:
     --no-color          Disable colored output (also supports NO_COLOR)
     --ids, --show-ids   Show Org IDs in list/today commands
+    --no-handles        Hide handles in list/today commands
 
 FILTERS (for list command):
     +tag              Filter by tag
@@ -998,6 +1260,8 @@ EXAMPLES:
     org-warrior schedule "6pm" today 1            # Schedule first task from today for 6pm
     org-warrior schedule "6pm" abc123def456       # Schedule task by Org ID
     org-warrior deadline "friday" +work 2         # Set deadline to friday for 2nd work task
+    org-warrior show paper-salmon-quiet           # Show task by handle
+    org-warrior handles-assign                    # Build handles for existing tasks
 """
     print(help_text.strip())
 
@@ -1035,7 +1299,8 @@ def main():
         'schedule': cmd_schedule,
         'deadline': cmd_deadline,
         'jira-sync': cmd_jira_sync,
-   
+        'handles-assign': cmd_handles_assign,
+    
         'add': cmd_add,
     }
     

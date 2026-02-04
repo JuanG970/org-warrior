@@ -1,0 +1,573 @@
+:PROPERTIES:
+:GPTEL_MODEL: gpt-5-mini
+:GPTEL_BACKEND: Copilot
+:GPTEL_SYSTEM: You are a large language model living in Emacs and a helpful assistant. Respond concisely.
+:GPTEL_BOUNDS: ((response (380 4568) (4771 9892) (10032 31639)))
+:END:
+
+*** What would be your take on creating a unique id for each task in my org-warrior program? Suggest a smart design keeping things simple
+
+Short answer: use Org's built‑in org-id as the canonical, stable ID for every headline, create it on add and lazily for existing headlines, allow prefix matching for CLI convenience, and provide a small batch helper to assign IDs to legacy content. This is simple, robust, and already fits your Emacs-based workflow.
+
+Design details
+
+- Canonical ID
+  - Use the org-id property (org-id-get-create / the "ID" property) as the single canonical identifier for a task. It is persistent across moves/renames and intended for this purpose.
+  - Benefits: stable, supported by org/Org‑mode, used already in your code (org-ql selects ID), and works well with emacsclient.
+
+- Creation policy
+  - Create IDs at creation time (your cmd_add already does this — keep it).
+  - For existing org files, create IDs lazily when a command needs one (e.g., show/schedule/deadline when the user supplies an index or when you display --ids), or provide a one‑time batch assign command to add missing IDs proactively.
+
+- Uniqueness
+  - Rely on org-id's UUID generation (org-id-uuid) which is globally unique. If you ever need to generate IDs from Python, use uuid.uuid4().
+  - Check for collisions when assigning in batch: search for an ID before writing (org-id-find / org-ql property query). Collisions are extremely unlikely with UUIDs but a simple defensive check is cheap.
+
+- CLI ergonomics
+  - Accept either full ID or a short prefix (e.g., first 8 characters) when referencing tasks. Resolve prefixes by finding all IDs that start with the prefix:
+    - If unique → use it.
+    - If ambiguous → report candidates.
+    - If none → error.
+  - Keep existing index fallback (int) as you do.
+
+- Implementation hooks (what to add/change)
+  - ensure_id(org_marker) helper in Emacs (or via your emacs_eval) that creates an ID if missing and returns it. You already call org-id-get-create in cmd_add; reuse that pattern.
+  - resolve_id(input) in Python:
+    - if input parses as int → index path (already done).
+    - else if input length >= 36 (full UUID) → use as-is.
+    - else → run an Emacs query (or run_org_ql) to list all IDs and match prefixes, or call an elisp snippet that does (org-id-find prefix) or (org-ql-select ... (property "ID") ...).
+  - batch_assign_missing_ids() command that:
+    - scans files (resolve_org_files)
+    - runs an elisp snippet to add IDs to headlines missing them (org-id-get-create on each headline)
+    - optionally commit changes to Git (git_commit_org)
+    - show summary of created IDs
+
+- Storage alternatives (only if you really need offline or external indexing)
+  - Local mapping file (~/.org-warrior/ids.json) mapping file:line → ID can help when you cannot talk to Emacs, but it's fragile (lines change).
+  - Prefer org-id stored in the Org file.
+
+- Example behavior and resilience
+  - When you show lists, include IDs via --ids (already present).
+  - When user types "org-warrior schedule 6pm abc123", accept abc123 as prefix, resolve to full ID, schedule by org-id-find — you already have that path implemented.
+  - Add helpful error messages for ambiguous prefixes and a suggestion to run batch assign if many entries have no IDs.
+
+Small pseudocode sketches
+
+- resolve_id (conceptual)
+  - if looks like int -> return index mode
+  - else if length >= 36 -> return id
+  - else:
+    - ids = emacs_eval("(mapconcat (lambda (id) id) (org-ql-select (org-agenda-files) (property \"ID\") :action '(org-entry-get nil \"ID\")) \"\\n\")")
+    - matches = [id for id in ids if id.startswith(prefix)]
+    - handle unique/ambiguous/none
+
+- batch assign (elisp snippet called via emacs_eval)
+  - loop over org-agenda-files
+  - for each headline: (unless (org-entry-get nil "ID") (org-id-get-create))
+  - save buffers, print summary
+
+Security/privacy note
+- If you prefer not to leak machine-specific info, use uuid.uuid4 (no MAC/time) rather than uuid1.
+
+Summary (one-line)
+- Use org-id as canonical IDs, create them on add and lazily as needed, support prefix matching for convenience, add a batch assign helper, and avoid bespoke-on‑filesystem ID systems unless you need offline-only operation. This keeps things simple, robust and integrates with your Emacs-centered workflow.
+
+*** For ergonomics, could we grab the org-id and convert it into something more manegable such as a unique word? That will be presented when doing org-warrior task list and the user could refer to it
+
+Yes — that’s a great ergonomics win. Keep the org-id as the canonical identifier, but present a short, human‑friendly handle in lists and accept that handle on the CLI. I’d do this with a deterministic, reversible (or at least resolvable) mapping + a tiny local cache for uniqueness/fast reverse lookup.
+
+Recommended design (simple + robust)
+
+1) Canonical storage
+- Keep using org-id (UUID) as the single source of truth in the Org files.
+- Friendly handles are just derived representations shown to the user; commands resolve them to org-id.
+
+2) Friendly-handle format
+- Use a short pronounceable multiword token (more memorable than hex): e.g. three words from a wordlist like EFF/Diceware → "paper-salmon-quiet".
+- Use lower-case, hyphen-separated, ASCII-only.
+- Deterministic from the org-id (so the same org-id always yields the same handle), but maintain a small local mapping file to guarantee uniqueness when collisions occur.
+
+3) Why three words?
+- Wordlists are powers-of-two-ish. Using a 2048-word list (11 bits/word) → 3 words = 33 bits (≈8.6 billion combos). Good balance of memorability vs collisions for ordinary task sets. If you expect massive numbers, increase to 4 words or choose a larger wordlist.
+- You can alternatively use 2 words + short numeric suffix if you prefer a shorter visible form.
+
+4) Collision handling
+- Deterministic mapping: hash the org-id (SHA256) → use bits to pick words from the list.
+- Keep a small cache file (~/.org-warrior/ids.json) mapping friendly → org-id and org-id → friendly. On first encounter (or batch pass), if the deterministic handle collides with a different org-id, pick a deterministic fallback (e.g., use the next available bit window, or append a small numeric suffix) and write that mapping to the cache so it remains stable.
+- If user supplies a friendly handle that maps to multiple org-ids (should be rare if you keep cache unique), report ambiguity.
+
+5) UX rules
+- Show the friendly handle in list output (first column), keep full org-id in --ids or verbose view.
+- Accept friendly handles case-insensitively and allow prefix matching: if prefix matches a unique friendly handle, resolve; if ambiguous, list matches.
+- Always accept full org-id as fallback (and index numbers for backward compatibility).
+
+6) Where to create handles
+- On add: create friendly handle immediately (deterministic) and write it to cache.
+- Lazily for legacy content: when you display --ids or list you can generate and cache friendly handles for items that lack a cached entry; or add a batch command to populate all.
+
+7) Implementation sketch (Python)
+
+- Data:
+  - wordlist: load a list of N words (e.g., 2048 words).
+  - cache file: JSON mapping like {"by_friendly": {"paper-salmon-quiet": "uuid..."}, "by_uuid": {"uuid...": "paper-salmon-quiet"}}.
+
+- friendly_from_uuid(uuid):
+  - h = sha256(uuid.encode()).digest()
+  - use successive 11-bit chunks of h to pick words (w1,w2,w3)
+  - candidate = "-".join([w1,w2,w3])
+  - if candidate not in cache or cache maps to this uuid → done
+  - else: generate deterministic fallback (e.g., take next chunk offset or append "-1", "-2" until free), store mapping in cache.
+
+- resolve_friendly(token):
+  - normalize token (lower, strip)
+  - if token in cache.by_friendly → return org-id
+  - else if token looks like full UUID → return that
+  - else do prefix match over cache.by_friendly keys (case-insensitive)
+    - unique → return org-id, ambiguous → report candidates, none → error.
+
+- batch_assign():
+  - iterate org-ql results (all headings with IDs)
+  - run friendly_from_uuid for each uuid (and write cache)
+  - save cache and optionally git-commit.
+
+8) Example behavior
+- List shows:
+  001 paper-salmon-quiet [TODO] (A) My task heading ...
+- User can run:
+  - org-warrior show paper-salmon-quiet
+  - org-warrior schedule "friday" paper-salmon-quiet
+- If ambiguous, the CLI says: "Ambiguous handle 'paper': matches paper-salmon-quiet, paper-pond-calm — use fuller handle or full org-id."
+
+9) Tradeoffs / notes
+- Deterministic mapping avoids a second round-trip to Emacs for generation and makes the same org-id stable across machines if you share the cache (but you probably won’t).
+- Cache guarantees uniqueness and allows stable handles even when deterministic mapping collides.
+- Security: plain deterministic hashes leak an easy mapping if someone sees a handle; that’s not usually a concern for task handles. If you prefer unpredictability, randomize the fallback phase and persist the mapping.
+- If you want the absolute minimal implementation, use base32 (Crockford) encoding of the first 48 bits of UUID (10 chars) — shorter but less mnemonic.
+
+10) Libraries & resources
+- EFF wordlists (2048 words) or diceware lists.
+- Use Python’s hashlib and uuid modules; JSON for cache persistence.
+
+If you want, I can provide a compact implementation (helper module) you can drop into your org-warrior program: load wordlist, functions friendly_from_uuid, resolve_friendly, and small cache handling + integration points (list display, schedule/show resolution). Which format do you prefer: 3-word handles or short base32 slugs?
+
+***  Write the design and the implementation ideas for me to be implemented by my engineer, include all the details to get the task done
+
+Below is a complete, actionable design and implementation plan your engineer can follow to add memorable, short “handles” for tasks while keeping org-id as the canonical identifier. It includes data layout, algorithms, Elisp/Emacs integration points, Python functions to add to your program, CLI integration notes, collision handling, testing, and deployment steps.
+
+Design summary (high level)
+- Canonical id: keep org-id (UUID) inside the Org file as the single source of truth.
+- Friendly handle: present a short, human-friendly token derived from the org-id (e.g., three-word phrase like paper-salmon-quiet). Always resolve friendly → org-id when acting on tasks.
+- Deterministic primary mapping: compute handle from org-id via sha256 → word indices. Use a small local cache (~/.org-warrior/handles.json) to guarantee uniqueness and stable overrides for collisions.
+- Operations:
+  - On add: create org-id (already done) and create+cache friendly handle.
+  - On list: show the friendly handle by default; keep --ids for full org-id.
+  - On CLI input: accept friendly handle (exact or unique prefix, case-insensitive), full org-id, or numeric index.
+  - Provide a batch command to assign IDs to legacy headings and populate the handle cache.
+
+Data & files
+- Wordlist file: ship a 2048-word file (EFF/Diceware style). Location options:
+  - Package resource (e.g., installed in the package directory), or
+  - User path ~/.org-warrior/wordlist.txt
+  - Fallback: embed a small list (not ideal but safe).
+- Cache file: ~/.org-warrior/handles.json (created automatically)
+  - Format:
+    {
+      "version": 1,
+      "by_friendly": { "paper-salmon-quiet": "uuid-..." },
+      "by_uuid": { "uuid-...": "paper-salmon-quiet" }
+    }
+- Atomic write: write to tmp file then rename to avoid corruption.
+
+Handle format & parameters
+- 3-word, hyphen-separated, lower-case tokens, picked from a 2048-word list.
+  - 2048 ≈ 11 bits per word → 33 bits total ≈ 8.6 billion combos.
+- Deterministic mapping: SHA256(org-id) → pick three 11-bit windows to index into the wordlist.
+- Collision fallback:
+  - If generated handle is already mapped to a different org-id in the cache, pick the next deterministic candidate (e.g., shift the bit-window offset) up to a limit; if still colliding, append a short decimal suffix (-1, -2) deterministically. Persist final mapping in cache.
+
+Algorithms / helper functions (Python)
+You will add the following functions (names are suggested and fit the existing file style). They use only stdlib modules: hashlib, json, uuid, os.
+
+Constants to add near top:
+  HANDLES_CACHE = os.path.expanduser("~/.org-warrior/handles.json")
+  WORDLIST_PATHS = [
+    os.path.join(os.path.dirname(__file__), "wordlist.txt"),         # package
+    os.path.expanduser("~/.org-warrior/wordlist.txt")               # user override
+  ]
+  WORDLIST_DEFAULT = ["alpha","bravo","charlie","delta", ...]      # small fallback if necessary
+  HANDLE_WORDS = 3
+  WORD_BITS = 11   # for 2048 wordlist
+
+Add imports:
+  import hashlib
+  import json
+  import uuid as _uuid
+  import tempfile
+
+Implementation of core helpers (sketch/code)
+- load_wordlist()
+  - Try candidate paths in WORDLIST_PATHS, load newline-separated words, strip, ensure length is power-of-two (prefer 2048). If none found, use WORDLIST_DEFAULT and warn.
+
+- load_cache() / save_cache()
+  - load JSON if exists, validate shape; otherwise create empty structure.
+  - save: write to tempfile in same dir then os.replace(tempname, HANDLES_CACHE).
+
+- _bits_from_bytes(data: bytes) -> int
+  - Convert bytes to a big integer for easy bit selection.
+
+- _pick_words_from_hash(hbytes, offset_bits=0) -> list[str]
+  - Convert hbytes -> integer; for i in 0..HANDLE_WORDS-1 pick a segment of WORD_BITS each starting at offset_bits + i*WORD_BITS (wrap if exceed hash length), produce indices modulo len(wordlist).
+
+- friendly_from_uuid(uuid_str: str) -> str
+  - Compute sha256(uuid_str.encode()).
+  - Try offsets [0, 1*WORD_BITS, 2*WORD_BITS, ... up to some max e.g. 8 attempts]. For each, build candidate words.
+  - Normalize candidate: lower, words separated by '-'.
+  - On collision (cache.by_friendly exists and points to different uuid):
+    - Try next offset(s).
+    - If all offsets exhausted, append "-1", "-2", ... until free; make suffix deterministic based on further hash bytes (so stable across runs).
+  - Return handle (and write to cache).
+
+- ensure_handle_for_uuid(uuid_str: str) -> str
+  - If uuid in cache.by_uuid, return it.
+  - Else run friendly_from_uuid, save mapping and return.
+
+- resolve_handle_or_uuid(token: str) -> str or raise
+  - Normalize token (lower, strip).
+  - If looks like UUID: try to validate using uuid.UUID(token) and return directly.
+  - Look exact in cache.by_friendly; if found return mapped uuid.
+  - Else do prefix search over cache.by_friendly keys:
+    - if unique prefix match → return
+    - if ambiguous → raise AmbiguousHandleError with candidates
+    - if none → raise NotFoundError
+  - If cache is empty (first run), recommend running batch_assign or generate mapping for visible tasks lazily.
+
+- batch_assign_handles(do_create_missing_ids: bool = True)
+  - If do_create_missing_ids:
+    - Run an elisp script via emacs_eval to walk org-agenda-files and call org-id-get-create on headlines missing ID. (Elisp snippet below.)
+    - Save result or ignore (elisp will modify files).
+  - Run run_org_ql with select="full" requesting id for all headings to get list of UUIDs (or you can use property query through org-ql to gather all IDs).
+  - For each uuid string returned, call ensure_handle_for_uuid(uuid) to populate cache.
+  - Save cache and print summary.
+
+Elisp snippet to ensure ids across files (run via emacs_eval):
+  (progn
+    (require 'org)
+    (require 'org-id)
+    (let ((out ""))
+      (dolist (f (org-agenda-files))
+        (with-current-buffer (find-file-noselect f)
+          (save-excursion
+            (goto-char (point-min))
+            (while (re-search-forward org-heading-regexp nil t)
+              (org-back-to-heading t)
+              (unless (org-entry-get nil "ID")
+                (org-id-get-create))
+              (let ((id (org-entry-get nil "ID")))
+                (setq out (concat out id "\\t" (buffer-file-name) ":" (number-to-string (line-number-at-pos)) "\\n")))))))
+      (princ out)))
+
+Integration points into existing code
+- Add the helper functions to your module (near emacs_eval and cache constants).
+- Add a new CLI command: "handles-assign" (or "assign-handles" / "handles init") mapped in commands dict to cmd_assign_handles, which calls batch_assign_handles(do_create_missing_ids=True) and prints summary.
+- Modify cmd_add: after emacs adds the entry and prints new_id, call ensure_handle_for_uuid(new_id) and save cache; optionally print the handle to the user: "Created: abc-foo-bar (ID: uuid...)".
+- Modify printing functions:
+  - Extend format_task and format_task_detail to accept a handle parameter (or to consult cache for task['id'] when formatting).
+  - By default list prints friendly handle column; keep --ids / --show-ids to show full org-id in addition.
+  - Example format: "001 abc-paper-salmon [TODO] (A) Heading ..." or show handle in front: "abc-paper-salmon 001 [TODO] Heading ..."
+- Resolve CLI handle inputs:
+  - In functions that accept ORG-ID (cmd_show, cmd_schedule, cmd_deadline, cmd_set_state), try resolving the token via resolve_handle_or_uuid first. If resolves to uuid → use the existing org-id-based elisp path. If resolves as ambiguous → print candidates and exit non-zero.
+  - For numeric index case (index path) keep existing behavior.
+
+Code examples
+Below are compact, copy-pasteable helper implementations the engineer can adapt to your file style. Replace ellipses in WORDLIST_DEFAULT or point WORDLIST_PATHS to a real 2048-word file.
+
+Add imports near top:
+  import hashlib
+  import json
+  import tempfile
+  import uuid as _uuid
+
+Constants:
+  HANDLES_CACHE = os.path.expanduser("~/.org-warrior/handles.json")
+  WORDLIST_PATHS = [
+    os.path.join(os.path.dirname(__file__), "wordlist.txt"),
+    os.path.expanduser("~/.org-warrior/wordlist.txt"),
+  ]
+  # Minimal fallback list; replace with 2048-word file
+  WORDLIST_DEFAULT = [
+    "apple", "banana", "cherry", "delta", "echo", "foxtrot", "golf", "hotel",
+    "india", "juliet", "kilo", "lime", "mango", "nectar", "orange", "papaya"
+  ]
+  HANDLE_WORDS = 3
+  WORD_BITS = 11  # 2048 words -> 11 bits
+
+Helper implementations (add to your module):
+  def load_wordlist():
+      for p in WORDLIST_PATHS:
+          try:
+              if os.path.isfile(p):
+                  with open(p, "r", encoding="utf-8") as fh:
+                      words = [w.strip().lower() for w in fh if w.strip()]
+                      if len(words) >= (1 << WORD_BITS):
+                          return words[:(1 << WORD_BITS)]
+          except Exception:
+              pass
+      # fallback: repeat/truncate to power-of-two length
+      words = WORDLIST_DEFAULT
+      # expand/truncate to 2*WORD_BITS if feasible
+      n = 1 << WORD_BITS
+      if len(words) >= n:
+          return words[:n]
+      # repeat to reach n (not ideal but keeps algorithm working)
+      out = []
+      i = 0
+      while len(out) < n:
+          out.append(words[i % len(words)])
+          i += 1
+      return out
+
+  def load_handles_cache():
+      if not os.path.exists(HANDLES_CACHE):
+          return {"version": 1, "by_friendly": {}, "by_uuid": {}}
+      try:
+          with open(HANDLES_CACHE, "r", encoding="utf-8") as fh:
+              return json.load(fh)
+      except Exception:
+          return {"version": 1, "by_friendly": {}, "by_uuid": {}}
+
+  def save_handles_cache(cache):
+      d = os.path.dirname(HANDLES_CACHE)
+      if d and not os.path.isdir(d):
+          os.makedirs(d, exist_ok=True)
+      fd, tmp = tempfile.mkstemp(prefix=".handles.", dir=d)
+      with os.fdopen(fd, "w", encoding="utf-8") as fh:
+          json.dump(cache, fh, indent=2, sort_keys=True)
+      os.replace(tmp, HANDLES_CACHE)
+
+  def _int_from_bytes(b):
+      return int.from_bytes(b, byteorder="big")
+
+  def _pick_words_from_hash(hash_bytes, words, offset_bits=0):
+      nwords = len(words)
+      total_bits = len(hash_bytes) * 8
+      hb_int = _int_from_bytes(hash_bytes)
+      out = []
+      for i in range(HANDLE_WORDS):
+          bitpos = (offset_bits + i * WORD_BITS) % total_bits
+          # extract WORD_BITS starting at bitpos
+          shift = total_bits - (bitpos + WORD_BITS)
+          idx = (hb_int >> shift) & ((1 << WORD_BITS) - 1)
+          idx = idx % nwords
+          out.append(words[idx])
+      return out
+
+  def friendly_candidate_from_uuid(uuid_str, offset_bits=0, wordlist=None):
+      if wordlist is None:
+          wordlist = load_wordlist()
+      h = hashlib.sha256(uuid_str.encode("utf-8")).digest()
+      words = _pick_words_from_hash(h, wordlist, offset_bits=offset_bits)
+      return "-".join(words)
+
+  def load_cache_and_wordlist():
+      return load_handles_cache(), load_wordlist()
+
+  def friendly_from_uuid(uuid_str):
+      cache, wordlist = load_cache_and_wordlist()
+      # Fast path
+      if uuid_str in cache["by_uuid"]:
+          return cache["by_uuid"][uuid_str]
+      # Try multiple offsets deterministically
+      attempts = 8
+      for k in range(attempts):
+          off = k * WORD_BITS
+          candidate = friendly_candidate_from_uuid(uuid_str, offset_bits=off, wordlist=wordlist)
+          existing = cache["by_friendly"].get(candidate)
+          if not existing or existing == uuid_str:
+              # accept
+              cache["by_friendly"][candidate] = uuid_str
+              cache["by_uuid"][uuid_str] = candidate
+              save_handles_cache(cache)
+              return candidate
+      # fallback: append deterministic numeric suffix
+      suffix_base = hashlib.sha256((uuid_str + "suffix").encode("utf-8")).digest()
+      suffix_int = _int_from_bytes(suffix_base) & 0xFFFF
+      for s in range(1, 1000):
+          candidate2 = f"{friendly_candidate_from_uuid(uuid_str, offset_bits=0, wordlist=wordlist)}-{s}"
+          existing = cache["by_friendly"].get(candidate2)
+          if not existing or existing == uuid_str:
+              cache["by_friendly"][candidate2] = uuid_str
+              cache["by_uuid"][uuid_str] = candidate2
+              save_handles_cache(cache)
+              return candidate2
+      # last resort: use hex short
+      short = uuid_str.replace("-", "")[:10]
+      candidate = f"id-{short}"
+      cache["by_friendly"][candidate] = uuid_str
+      cache["by_uuid"][uuid_str] = candidate
+      save_handles_cache(cache)
+      return candidate
+
+  def ensure_handle_for_uuid(uuid_str):
+      cache = load_handles_cache()
+      if uuid_str in cache["by_uuid"]:
+          return cache["by_uuid"][uuid_str]
+      return friendly_from_uuid(uuid_str)
+
+  class HandleError(Exception):
+      pass
+
+  class AmbiguousHandleError(HandleError):
+      def __init__(self, token, candidates):
+          super().__init__(f"Ambiguous handle '{token}': {', '.join(candidates)}")
+          self.candidates = candidates
+
+  class HandleNotFoundError(HandleError):
+      pass
+
+  def resolve_handle_or_uuid(token):
+      token = token.strip().lower()
+      cache = load_handles_cache()
+      # full uuid?
+      try:
+          uu = _uuid.UUID(token)
+          return str(uu)
+      except Exception:
+          pass
+      # exact match
+      if token in cache["by_friendly"]:
+          return cache["by_friendly"][token]
+      # prefix match
+      matches = [k for k in cache["by_friendly"] if k.startswith(token)]
+      if len(matches) == 1:
+          return cache["by_friendly"][matches[0]]
+      if len(matches) > 1:
+          raise AmbiguousHandleError(token, matches[:10])
+      raise HandleNotFoundError(f"No handle or UUID matching '{token}'")
+
+Batch assignment function:
+  def batch_assign_handles(create_missing_ids=True):
+      # optionally create missing org-id values in files via elisp
+      if create_missing_ids:
+          elisp = '''(progn
+      (require 'org)
+      (require 'org-id)
+      (let ((out ""))
+        (dolist (f (org-agenda-files))
+          (with-current-buffer (find-file-noselect f)
+            (save-excursion
+              (goto-char (point-min))
+              (while (re-search-forward org-heading-regexp nil t)
+                (org-back-to-heading t)
+                (unless (org-entry-get nil "ID")
+                  (org-id-get-create))
+                (let ((id (org-entry-get nil "ID")))
+                  (setq out (concat out id "\\n"))))))))
+        (princ out)))'''
+          try:
+              out = emacs_eval(elisp)
+          except RuntimeError as e:
+              print("Error ensuring IDs:", e, file=sys.stderr)
+              out = ""
+      # Now query all IDs via org-ql: get property "ID" for all headlines
+      results = run_org_ql('(property "ID" "")', select="full")
+      # parse results: each result when select="full" contains id at last position; your parse_result already extracts id
+      cache = load_handles_cache()
+      created = 0
+      for line in results:
+          r = parse_result(line)
+          uid = r.get("id")
+          if not uid:
+              continue
+          if uid not in cache["by_uuid"]:
+              h = friendly_from_uuid(uid)
+              created += 1
+      if created:
+          print(f"Assigned handles for {created} items (cache saved to {HANDLES_CACHE})")
+      else:
+          print("No new handles assigned.")
+
+Notes on integrating with list/show/schedule/etc.
+- cmd_list:
+  - After query results returned, iterate results and for each parsed task if task['id'] exists call ensure_handle_for_uuid(task['id']) to guarantee cached handle. Then call format_task with an extra parameter handle=cache['by_uuid'][id] or just modify format_task to look up handle given id.
+  - Provide CLI flags:
+    - Default: show handle (short) column
+    - --ids / --show-ids: show full org-id column as you already implemented
+    - Maybe add --no-handles to disable them
+- format_task():
+  - Add param handle=None. If provided, display as first token: colorize(handle, None, bold=True) or colored dim.
+  - Example line: "  abc-paper-salmon  [TODO] (A) My heading  DUE:2026-02-04"
+
+- cmd_show/cmd_schedule/cmd_deadline/cmd_set_state:
+  - Where you accept an org-id argument, first call:
+      try:
+          uuid = resolve_handle_or_uuid(arg)
+      except AmbiguousHandleError as e:
+          print error and list candidates (suggest user to pass full handle or id)
+          return
+      except HandleNotFoundError:
+          fall back to previous behavior: maybe treat as index or error.
+  - If uuid returned, continue with existing org-id code paths (org-id-find elisp code you already have).
+
+Edge cases and behavior
+- If cache empty and user supplies a handle, resolution will fail. Provide helpful message: "Unknown handle. Run 'org-warrior handles-assign' to create handles for existing tasks, or use full org-id or numeric index."
+- Ambiguous prefixes: refuse and show candidates.
+- Collisions extremely unlikely, but cache ensures uniqueness. The deterministic mapping means across multiple machines the same org-id yields same handle if they share the same wordlist; if you want per-machine randomness do not use deterministic fallback and instead pick random unused token, but persist it.
+- If users move tasks between machines or a shared repository, handles are stable only if caches are synchronized or deterministic algorithm resolves without collision. Deterministic mapping makes handle reproducible but collisions are resolved by the local cache; two machines might resolve the same collision differently — rare and OK for personal usage.
+
+Testing & verification
+- Unit tests for mapping:
+  - Same UUID always yields same handle.
+  - Two different UUIDs rarely yield same handle; simulate collisions using a reduced wordlist to force a collision and ensure fallback suffix is applied deterministically.
+- Integration tests:
+  - Emulate emacs_eval with a stub returning sample run_org_ql output and verify ensuring handles, batch_assign, resolve_handle_or_uuid behavior.
+- End-to-end manual test:
+  1) Run org-warrior add "Test task" — ensure output includes the handle.
+  2) Run org-warrior list — handle appears.
+  3) Run org-warrior show <handle> — resolves to task detail.
+  4) Run org-warrior schedule "tomorrow" <handle> — scheduled correctly in Emacs.
+  5) Run org-warrior handles-assign — creates handles for legacy tasks and writes cache.
+
+Developer checklist / implementation steps
+1) Add constants, imports, and helper functions (load_wordlist, load_cache/save_cache, friendly_from_uuid, ensure_handle_for_uuid, resolve_handle_or_uuid) to your org-warrior module.
+2) Add a small wordlist resource file to the package (preferred) or instruct users to place ~/.org-warrior/wordlist.txt. Use EFF 2048 word list.
+3) Add CLI handler cmd_assign_handles for batch assignment; wire into commands dictionary with name "handles-assign" or similar.
+4) Update cmd_add to call ensure_handle_for_uuid(new_id) and print handle alongside created ID.
+5) Update format_task and format_task_detail and call ensure_handle_for_uuid when printing lists. Make handle the primary shown short ID and leave --ids to show the long ID.
+6) Update handlers that accept an ID token (cmd_show, cmd_schedule, cmd_deadline, cmd_set_state) to first try resolve_handle_or_uuid() and handle ambiguous/not-found cases properly.
+7) Add tests and run integration tests with a dev Emacs instance (emacs --daemon and emacsclient) or use a stub for emacs_eval in tests.
+8) Documentation: update CLI help text and README to explain handles, cache path, and commands.
+9) Optional: add --rebuild-handles flag to force recalculation and overwrite cache (useful to resolve conflicts or when switching wordlist).
+
+Security & privacy notes
+- Handles derived deterministically from org-id leak some information about the org-id (not a security issue in most personal setups).
+- If privacy matters, prefer purely random assignment at creation time and persist mapping; do not derive deterministically.
+- Cache is a local file; if you upload it somewhere you may leak IDs.
+
+Performance & scaling
+- The mapping algorithm uses one SHA256 and a few small operations per id; trivial CPU cost for tens of thousands of tasks.
+- Cache lookups are O(1). Batch assignment uses Emacs to create IDs and then reads them — run time dominated by Emacs I/O, which is acceptable.
+- Wordlist of 2048 words is small (<20KiB); no memory issues.
+
+Examples: how CLI will look after change
+- List:
+  001 paper-salmon-quiet [TODO] (A) Finish project report  DUE:2026-02-04
+  002 ocean-mint-calm     [NEXT]  (B) Call supplier
+- Show:
+  $ org-warrior show paper-salmon-quiet
+  Task:
+    [TODO] (A) Finish project report
+    Deadline: 2026-02-04 17:00
+    Location: ~/org/project.org:123
+    ID: 3e9f7a2b-...
+
+- Schedule:
+  $ org-warrior schedule "6pm" paper-salmon-quiet
+  ✓ Scheduled task: Finish project report
+
+Final notes
+- Deterministic mapping + local cache gives a great ergonomics win (memorable handles, stable except for rare collisions).
+- Keep org-id as canonical, only use handles as user-facing convenience and for resolving to org-id.
+- Provide the batch assign tool so users can populate existing content.
+- I can provide a complete patch for the exact location(s) in your file if you want: (1) a patch for adding helpers and wiring into existing functions and (2) the wordlist file. Tell me whether you want the deterministic 3-word handle implementation or a shorter base32 slug implementation and I’ll produce the exact code PR-ready for your repo.
+
+*** 

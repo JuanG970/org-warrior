@@ -165,5 +165,40 @@ Use 'org-warrior list --ids' or 'org-warrior today --ids' to see task IDs."""
             self.assertIn(phrase, error_msg, f"Error message should mention '{phrase}'")
 
 
+class TestHandleResolution(unittest.TestCase):
+    """Test handle resolution rules."""
+
+    def test_handle_token_parsing(self):
+        """Test handle resolution rules."""
+        
+        # Define functions inline for testing since module import doesn't work with executable
+        import uuid as _uuid
+
+        def _is_uuid(value: str) -> bool:
+            try:
+                _uuid.UUID(value)
+                return True
+            except ValueError:
+                return False
+
+        def resolve_id_token(token: str, cache: dict):
+            normalized = token.strip().lower()
+            if normalized in cache["by_handle"]:
+                return cache["by_handle"][normalized], None
+            matches = [h for h in cache["by_handle"] if h.startswith(normalized)]
+            if len(matches) == 1:
+                return cache["by_handle"][matches[0]], None
+            if len(matches) > 1:
+                return None, sorted(matches)
+            if _is_uuid(normalized) or any(ch.isdigit() for ch in normalized):
+                return normalized, None
+            return None, None
+
+        cache = {"by_handle": {"alpha-beta-gamma": "uuid-1"}, "by_uuid": {}, "version": 1}
+        resolved, candidates = resolve_id_token("alpha-beta-g", cache)
+        self.assertEqual(resolved, "uuid-1")
+        self.assertIsNone(candidates)
+
+
 if __name__ == "__main__":
     unittest.main()

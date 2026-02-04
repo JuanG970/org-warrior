@@ -1,0 +1,56 @@
+#+title: Org ID Requirements
+
+* Goals
+- Org ID (UUID) remains the canonical identifier stored in Org files.
+- Provide a friendly handle for humans, but always resolve handle -> Org ID for actions.
+- Keep behavior consistent with existing org-warrior flows (list/show/schedule/set-state).
+
+* Principles (First Principles)
+- DRY: one source of truth for identity (Org ID in the file).
+- KISS: add only the minimum data and commands needed for handles.
+- Compatibility: existing Org ID and index-based usage continue to work.
+
+* Requirements (Must)
+- On add, create and persist an Org ID (already required behavior).
+- Derive a deterministic handle from the Org ID using a wordlist.
+- Cache handle <-> Org ID mappings locally to ensure uniqueness and stable collisions.
+- Accept inputs as: handle (case-insensitive, exact or unique prefix), full Org ID, or numeric index.
+- List shows handles by default; --ids shows Org IDs (and must still work).
+- Provide a batch command to:
+  - assign missing Org IDs to legacy headings, and
+  - populate the handle cache for existing tasks.
+- Provide an Emacs/Org snippet to ensure manual Org entries always get Org IDs.
+
+* Data Files
+- Wordlist:
+  - Prefer a packaged list; allow ~/.org-warrior/wordlist.txt override.
+  - Wordlist length should be a power of two (2048 preferred).
+- Cache:
+  - ~/.org-warrior/handles.json
+  - Maps both directions (by_uuid and by_handle).
+  - Writes must be atomic to prevent corruption.
+
+* Deterministic Handle Mapping
+- Same Org ID must always map to the same handle (given the same wordlist).
+- Collisions must be resolved deterministically and persisted in the cache.
+- No random handle assignment in the default flow.
+
+* Error Handling
+- Unknown handle: explain how to run the batch assign command or use Org ID.
+- Ambiguous prefix: show candidates and fail with non-zero exit.
+- Missing Org IDs on legacy tasks: batch assign must create them first.
+
+* Commands / UX
+- Add a handles-assign (name TBD) command to initialize IDs and handles.
+- add should report both handle and Org ID.
+- show/schedule/deadline/set-state accept handles as well as Org IDs.
+
+* Non-goals
+- Do not replace Org ID as canonical identity.
+- Do not sync handle cache across machines.
+- No security guarantees for handle privacy.
+
+* Testing (Minimal)
+- Determinism: same Org ID -> same handle.
+- Resolution: handle, prefix, and Org ID lookup behave as expected.
+- Batch assign: creates IDs and populates handles for existing tasks.

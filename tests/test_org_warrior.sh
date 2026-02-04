@@ -7,6 +7,8 @@ ORG_WARRIOR="${SCRIPT_DIR}/../src/org-warrior"
 TEST_DIR="/tmp/org-warrior-test-$$"
 FAILED=0
 PASSED=0
+EMACS_PID=""
+export ORG_WARRIOR_SERVER="org-warrior-test-$$"
 
 # Colors
 RED='\033[0;31m'
@@ -34,6 +36,7 @@ CLOSED_OLD="${DATE_VARS[4]}"
 setup() {
     mkdir -p "$TEST_DIR"
     TEST_DIR=$(realpath "$TEST_DIR")  # Resolve symlinks (e.g., /tmp -> /private/tmp on macOS)
+    start_emacs_daemon || exit 1
     cat > "$TEST_DIR/test.org" << EOF
 * TODO Buy groceries :home:
 DEADLINE: $TODAY
@@ -63,10 +66,14 @@ DEADLINE: $TODAY
 * TODO Nested todo :nested:
 EOF
     export ORG_WARRIOR_FILES="$TEST_DIR"
+    "$ORG_WARRIOR" handles-assign >/dev/null 2>&1
 }
 
 teardown() {
     rm -rf "$TEST_DIR"
+    if [ -n "$EMACS_PID" ]; then
+        kill "$EMACS_PID" >/dev/null 2>&1 || true
+    fi
 }
 
 assert_contains() {
@@ -101,6 +108,36 @@ assert_count() {
     fi
 }
 
+start_emacs_daemon() {
+    if emacsclient -s "$ORG_WARRIOR_SERVER" -e '(+ 1 1)' >/dev/null 2>&1; then
+        return 0
+    fi
+    emacs --daemon="$ORG_WARRIOR_SERVER" >/dev/null 2>&1
+    for _ in {1..60}; do
+        if emacsclient -s "$ORG_WARRIOR_SERVER" -e '(+ 1 1)' >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Error: Emacs daemon failed to start." >&2
+    return 1
+}
+
+get_sample_handle() {
+    python3 - <<'PY'
+import json
+import os
+path = os.path.expanduser("~/.org-warrior/handles.json")
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    handles = list(data.get("by_handle", {}).keys())
+    print(handles[0] if handles else "")
+except FileNotFoundError:
+    print("")
+PY
+}
+
 # Test: Help output
 test_help() {
     local output
@@ -125,6 +162,8 @@ test_task_detail() {
     assert_contains "$output" "Task 1:" "task shows header with id"
     assert_contains "$output" "Buy groceries" "task shows correct heading"
     assert_contains "$output" "Location: ${TEST_DIR}/test.org:" "task shows file and line"
+    assert_contains "$output" "Handle:" "task shows handle"
+    assert_contains "$output" "ID:" "task shows ID"
 }
 
 # Test: Next actions
@@ -236,6 +275,40 @@ test_list_with_ids() {
     assert_contains "$output" "ID:" "list --ids shows ID labels"
 }
 
+test_list_handles_default() {
+    local output
+    local handle
+    output=$("$ORG_WARRIOR" list 2>&1)
+    handle=$(get_sample_handle)
+    if [ -z "$handle" ]; then
+        echo -e "${RED}✗${NC} list shows handles by default"
+        echo "  Expected to find a handle in cache"
+        ((FAILED++))
+        return
+    fi
+    assert_contains "$output" "$handle" "list shows handles by default"
+}
+
+test_list_no_handles() {
+    local output
+    local handle
+    output=$("$ORG_WARRIOR" list --no-handles 2>&1)
+    handle=$(get_sample_handle)
+    if [ -n "$handle" ] && echo "$output" | grep -q -- "$handle"; then
+        echo -e "${RED}✗${NC} list --no-handles hides handles"
+        ((FAILED++))
+    else
+        echo -e "${GREEN}✓${NC} list --no-handles hides handles"
+        ((PASSED++))
+    fi
+}
+
+test_handles_assign() {
+    local output
+    output=$("$ORG_WARRIOR" handles-assign 2>&1)
+    assert_contains "$output" "Handles cached" "handles-assign populates cache"
+}
+
 # Test: --ids flag with today
 test_today_with_ids() {
     local output
@@ -278,6 +351,9 @@ main() {
     test_tag_filter
     test_query
     test_list_with_ids
+    test_list_handles_default
+    test_list_no_handles
+    test_handles_assign
     test_today_with_ids
     test_out_of_range_error
     
