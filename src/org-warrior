@@ -216,37 +216,137 @@ def ensure_handles_for_results(results: list) -> Tuple[dict, list, bool]:
 
 
 def batch_assign_handles(create_missing_ids: bool = True) -> None:
-    create_flag = "t" if create_missing_ids else "nil"
-    elisp = f"""(progn
+    """Assign Org IDs to legacy headings and populate handle cache."""
+    
+    if not create_missing_ids:
+        print("Scanning org files for existing IDs...")
+        # Manual parsing approach - more reliable than Emacs for just reading
+        cache = load_handle_cache()
+        wordlist = load_wordlist()
+        updated = False
+        total_headings = 0
+        found_ids = 0
+        
+        files = resolve_org_files(ORG_FILES)
+        for file_path in files:
+            if not os.path.isfile(file_path):
+                continue
+                
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    
+                # Count headings
+                headings = re.findall(r'^\*+\s+', content, re.MULTILINE)
+                total_headings += len(headings)
+                
+                # Find existing IDs
+                id_matches = re.findall(r':ID:\s+([a-fA-F0-9-]+)', content)
+                for org_id in id_matches:
+                    found_ids += 1
+                    _, created = ensure_handle_for_uuid(org_id, cache, wordlist)
+                    updated = updated or created
+                    
+            except Exception as e:
+                print(f"Warning: Could not read {file_path}: {e}")
+                
+        if updated:
+            save_handle_cache(cache)
+            
+        print(f"Found {found_ids} existing IDs out of {total_headings} headings")
+        print(f"Handles cached: {len(cache['by_uuid'])}")
+        
+        if found_ids < total_headings:
+            missing = total_headings - found_ids
+            print(f"{missing} headings are missing IDs.")
+            print("To create missing IDs, run: org-warrior handles-assign")
+            print("Or add IDs manually in Emacs with M-x org-id-get-create")
+        
+        return
+    
+    # For creating new IDs, we still need Emacs but with better error handling
+    print("Creating missing Org IDs via Emacs...")
+    print("This may take a moment for large org collections...")
+    
+    try:
+        # Test Emacs connectivity first
+        emacs_eval("(+ 1 1)")
+    except Exception as e:
+        print(f"Error: Cannot connect to Emacs daemon: {e}")
+        print("Make sure Emacs daemon is running:")
+        print(f"  emacs --daemon={EMACS_SERVER}")
+        print("Or set ORG_WARRIOR_SERVER to your daemon name")
+        return
+    
+    # Use the safer elisp version
+    create_elisp = """(progn
   (require 'org)
   (require 'org-id)
-  (let ((out ""))
-    (dolist (f (org-agenda-files))
-      (with-current-buffer (find-file-noselect f)
-        (save-excursion
-          (goto-char (point-min))
-          (while (re-search-forward org-heading-regexp nil t)
-            (org-back-to-heading t)
-            (when (or {create_flag} (org-entry-get nil "ID"))
-              (unless (org-entry-get nil "ID")
-                (org-id-get-create))
-              (let ((id (org-entry-get nil "ID")))
-                (when id
-                  (setq out (concat out id "\\n")))))))
-        (save-buffer)))
+  (let ((out "")
+        (files-processed 0)
+        (ids-created 0))
+    (condition-case err
+      (progn
+        (dolist (f (org-agenda-files))
+          (condition-case file-err
+            (with-current-buffer (find-file-noselect f)
+              (setq files-processed (1+ files-processed))
+              (let ((file-modified nil))
+                (save-excursion
+                  (goto-char (point-min))
+                  (while (re-search-forward org-heading-regexp nil t)
+                    (org-back-to-heading t)
+                    (unless (org-entry-get nil "ID")
+                      (condition-case id-err
+                        (let ((new-id (org-id-get-create)))
+                          (setq ids-created (1+ ids-created))
+                          (setq file-modified t)
+                          (setq out (concat out new-id "\\n")))
+                        (error (message "Could not create ID: %s" id-err))))))
+                (when file-modified
+                  (condition-case save-err
+                    (save-buffer)
+                    (error (message "Could not save %s: %s" f save-err))))))
+            (error (message "Error processing file %s: %s" f file-err))))
+        (setq out (concat out "SUMMARY:" (number-to-string files-processed) 
+                         " files, " (number-to-string ids-created) " IDs created\\n")))
+      (error (setq out (concat "ERROR:" (error-message-string err) "\\n"))))
     (princ out)))"""
-    output = emacs_eval_with_agenda(elisp, timeout=60)
-    cache = load_handle_cache()
-    wordlist = load_wordlist()
-    updated = False
-    for line in output.splitlines():
-        org_id = line.strip().strip('"')
-        if org_id:
-            _, created = ensure_handle_for_uuid(org_id, cache, wordlist)
-            updated = updated or created
-    if updated:
-        save_handle_cache(cache)
-    print(f"Handles cached: {len(cache['by_uuid'])}")
+    
+    try:
+        output = emacs_eval_with_agenda(create_elisp, timeout=180)  # 3 minute timeout
+        lines = output.splitlines()
+        
+        cache = load_handle_cache()
+        wordlist = load_wordlist()
+        updated = False
+        new_ids = []
+        
+        for line in lines:
+            line = line.strip().strip('"')
+            if line.startswith("SUMMARY:"):
+                print(line.replace("SUMMARY:", "Processed: "))
+            elif line.startswith("ERROR:"):
+                print(f"Emacs error: {line.replace('ERROR:', '')}")
+            elif line and not line.startswith(("Processed:", "Error", "Could not")):
+                new_ids.append(line)
+                _, created = ensure_handle_for_uuid(line, cache, wordlist)
+                updated = updated or created
+        
+        if updated:
+            save_handle_cache(cache)
+            
+        print(f"Created {len(new_ids)} new IDs")
+        print(f"Total handles cached: {len(cache['by_uuid'])}")
+        
+    except Exception as e:
+        print(f"Error during ID creation: {e}")
+        print("\nFallback: Try manual ID assignment in Emacs:")
+        print("1. Open your org files")
+        print("2. Go to headings without IDs") 
+        print("3. Run: M-x org-id-get-create")
+        print("4. Run: org-warrior handles-assign --no-create")
+        print("\nOr check your Emacs daemon configuration.")
 
 
 def parse_org_timestamp(value: Optional[str]) -> Tuple[Optional[date], Optional[str]]:
@@ -1191,10 +1291,17 @@ def cmd_jira_sync(args):
 
 def cmd_handles_assign(args):
     """Assign Org IDs to legacy headings and populate handle cache."""
+    create_missing_ids = True
+    
     if args:
-        print("Usage: org-warrior handles-assign", file=sys.stderr)
-        return
-    batch_assign_handles(create_missing_ids=True)
+        if len(args) == 1 and args[0] in ['--no-create', '--scan-only']:
+            create_missing_ids = False
+        else:
+            print("Usage: org-warrior handles-assign [--no-create]", file=sys.stderr)
+            print("  --no-create: Only scan for existing IDs, don't create new ones", file=sys.stderr)
+            return
+    
+    batch_assign_handles(create_missing_ids=create_missing_ids)
 
 
 def print_help():
