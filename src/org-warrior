@@ -1351,13 +1351,37 @@ COMMANDS:
     deadline <date> [filter] <id|handle|org-id>  Set deadline for a task
     add <title>          Add new TODO to inbox
     set-state <HANDLE|ORG-ID> <STATE>     Set TODO state by handle or org ID
-    handles-assign      Scan org files and cache handles (warns about missing IDs)
+    handles-assign      Scan org files for existing IDs and cache handles
     jira-sync            Trigger org-jira sync
 
 OPTIONS:
     --no-color          Disable colored output (also supports NO_COLOR)
     --ids, --show-ids   Show Org IDs in list/today commands
     --no-handles        Hide handles in list/today commands
+
+HANDLES:
+    org-warrior uses friendly handles derived from Org IDs for human-friendly task references.
+    
+    - Handles are deterministic 3-word names like: paper-salmon-quiet, golf-echo-charlie
+    - Only works with tasks that have Org IDs (:ID: properties)  
+    - handles-assign scans for existing IDs but does NOT create new ones
+    - ID creation is handled by your Emacs configuration (see SETUP below)
+
+SETUP (Required for handles):
+    Add this to your Emacs config (~/.doom.d/config.el for Doom):
+    
+        (defun org-warrior/ensure-ids-on-save ()
+          "Ensure all headings have IDs before saving."
+          (when (eq major-mode 'org-mode)
+            (save-excursion
+              (org-map-entries
+               (lambda ()
+                 (unless (org-id-get)
+                   (org-id-get-create)))))))
+        
+        (add-hook 'before-save-hook 'org-warrior/ensure-ids-on-save)
+    
+    Then restart Emacs and save your org files to generate IDs automatically.
 
 FILTERS (for list command):
     +tag              Filter by tag
@@ -1374,19 +1398,44 @@ ENVIRONMENT:
     EMACS_CMD           Emacs command (default: emacsclient)
     ORG_WARRIOR_SERVER  Emacs server name (default: edit)
 
-EXAMPLES:
+WORKFLOW EXAMPLES:
+    # 1. First-time setup: scan for existing IDs and cache handles  
+    org-warrior handles-assign
+    # Output: Found 46 IDs out of 991 headings, ⚠️ 945 headings missing IDs
+    
+    # 2. Regular usage: list tasks (shows handles by default)
+    org-warrior list
+    # Output: 1 paper-salmon-quiet [TODO] Fix bug in parser
+    
+    # 3. Use handles for task operations  
+    org-warrior show paper-salmon-quiet           # Show task details
+    org-warrior schedule "tomorrow" paper-salmon-quiet  # Schedule by handle
+    org-warrior set-state paper-salmon-quiet DONE  # Complete task
+    
+    # 4. View tasks with different ID formats
+    org-warrior list --ids                        # Show org-IDs alongside
+    org-warrior list --no-handles                 # Hide handles, show only TODO states
+    
+    # 5. Handle resolution (case insensitive, supports prefixes)
+    org-warrior show paper-salmon-quiet           # Full handle
+    org-warrior show paper-salmon                 # Unique prefix works
+    org-warrior show paper                        # Shows error if ambiguous
+
+OTHER EXAMPLES:
     org-warrior                                   # List all open tasks
-    org-warrior today --ids                       # Today's tasks with Org IDs
+    org-warrior today --ids                       # Today's tasks with Org IDs  
     org-warrior +work due:week                    # Work tasks due this week
     org-warrior search meeting                    # Search for 'meeting'
-    org-warrior show index 1 scheduled:today      # Show first task from today's scheduled tasks
-    org-warrior query '(todo "STRT")'             # Raw org-ql query
-    org-warrior start today 1                     # Clock in to first task from today
-    org-warrior schedule "6pm" today 1            # Schedule first task from today for 6pm
-    org-warrior schedule "6pm" abc123def456       # Schedule task by Org ID
-    org-warrior deadline "friday" +work 2         # Set deadline to friday for 2nd work task
-    org-warrior show paper-salmon-quiet           # Show task by handle
-    org-warrior handles-assign                    # Scan for IDs and cache handles
+    org-warrior show index 1 scheduled:today     # Show first task from today's scheduled  
+    org-warrior query '(todo "STRT")'            # Raw org-ql query
+    org-warrior start today 1                    # Clock in to first task from today
+    org-warrior deadline "friday" +work 2        # Set deadline to friday for 2nd work task
+
+NOTES:
+    - handles-assign only scans existing IDs, does not create them
+    - ID creation happens in Emacs when you save org files (with proper config)
+    - Handles are cached in ~/.org-warrior/handles.json
+    - Run handles-assign after adding IDs to update the handle cache
 """
     print(help_text.strip())
 
