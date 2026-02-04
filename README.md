@@ -34,7 +34,10 @@ Data Files
 
 Setup
 -----
-For automatic Org ID creation in Emacs, add docs/emacs-setup.el to your config.
+For automatic Org ID creation in Emacs:
+- **Doom Emacs users:** See docs/doom-emacs-setup.md
+- **Other Emacs users:** Add docs/emacs-setup.el to your config
+- **Quick fix for existing files:** Load docs/quick-fix.el
 
 Examples
 --------
