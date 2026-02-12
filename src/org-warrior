@@ -942,6 +942,17 @@ def _parse_display_flags(args):
     return flags
 
 
+def _parse_show_flags(args):
+    include_body = True
+    remaining = []
+    for arg in args:
+        if arg == '--no-body':
+            include_body = False
+        else:
+            remaining.append(arg)
+    return include_body, remaining
+
+
 def cmd_list(args):
     """List tasks matching filters."""
     f = _parse_display_flags(args)
@@ -1279,14 +1290,78 @@ def emacs_eval(elisp: str) -> str:
     return _unescape_elisp_string(out)
 
 
+def _get_task_body(org_id: str) -> Optional[str]:
+    elisp = rf"""(progn
+  (require 'org)
+  (require 'org-id)
+  (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
+    (if (not m)
+        (princ "NOT_FOUND")
+      (with-current-buffer (marker-buffer m)
+        (goto-char m)
+        (org-back-to-heading t)
+        (end-of-line)
+        (forward-char 1)
+        (let* ((cb (point))
+               (ce (save-excursion (org-end-of-subtree t t) (point))))
+          (if (and cb ce (< cb ce))
+              (princ (string-trim-right (buffer-substring-no-properties cb ce)))
+            (princ "")))))))"""
+    out = emacs_eval(elisp)
+    if out == 'NOT_FOUND':
+        return None
+    return out.rstrip("\n")
+
+
+def _print_task_with_body(task, idx=None, include_body=True):
+    print(format_task_detail(task, idx))
+    if not include_body:
+        return 0
+    org_id = task.get('id')
+    if not org_id:
+        print("Body:")
+        print("(missing ID)")
+        return 0
+    try:
+        body = _get_task_body(org_id)
+    except RuntimeError as e:
+        print(f"Error reading body: {e}", file=sys.stderr)
+        return 1
+    if body is None:
+        print("Body:")
+        print("(not found)")
+        return 1
+    print("Body:")
+    if body.strip():
+        print(body)
+    else:
+        print("(empty)")
+    return 0
+
+
 def cmd_show(args):
     """Show a task by Org ID (preferred) or by list index (fallback)."""
-    if not args:
-        print("Usage: org-warrior show <HANDLE|ORG-ID> | show index <n> [filters]", file=sys.stderr)
+    include_body, remaining = _parse_show_flags(args)
+    if not remaining:
+        print("Usage: org-warrior show <HANDLE|ORG-ID> [--no-body] | show index <n> [filters] [--no-body]", file=sys.stderr)
         return 1
-    if args[0] == 'index':
-        return cmd_task(args[1:])
-    org_id = _resolve_handle_or_fail(args[0])
+    if remaining[0] == 'index':
+        if len(remaining) < 2:
+            print("Usage: org-warrior show index <n> [filters] [--no-body]", file=sys.stderr)
+            return 1
+        try:
+            idx = int(remaining[1])
+        except ValueError:
+            print("Error: index must be a number.", file=sys.stderr)
+            return 1
+        query = _resolve_query_from_filter(remaining[2:])
+        results = run_org_ql(query, select="full")
+        task = _get_task_by_index(results, idx)
+        if not task:
+            return 1
+        return _print_task_with_body(task, idx=idx, include_body=include_body)
+
+    org_id = _resolve_handle_or_fail(remaining[0])
     if not org_id:
         return 1
     # org-ql property query (fast, avoids org-id global scan)
@@ -1298,8 +1373,7 @@ def cmd_show(args):
     cache, tasks, updated = ensure_handles_for_results([results[0]])
     if updated:
         save_handle_cache(cache)
-    print(format_task_detail(tasks[0]))
-    return 0
+    return _print_task_with_body(tasks[0], include_body=include_body)
 
 
 def cmd_add(args):
