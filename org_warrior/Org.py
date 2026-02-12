@@ -338,6 +338,140 @@ class OrgQL:
             logging.error(f"Error adding task: {e}")
             return None
 
+    @staticmethod
+    def clock_in(org_id: str) -> tuple[bool, str]:
+        """
+        Clock in to a task by Org ID.
+
+        Args:
+            org_id: The Org ID of the task
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file("clock-in.el", params={"org_id": org_id})
+            if not result:
+                return False, "No response from Emacs"
+            if result == "NOT_FOUND":
+                return False, "Task not found"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, result.strip()
+        except Exception as e:
+            logging.error(f"Error clocking in: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def clock_out() -> tuple[bool, str]:
+        """
+        Clock out from the current task.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file("clock-out.el", params={})
+            if not result:
+                return False, "No response from Emacs"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, "Clocked out successfully"
+        except Exception as e:
+            logging.error(f"Error clocking out: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def schedule(org_id: str, date: str) -> tuple[bool, str]:
+        """
+        Schedule a task for a specific date.
+
+        Args:
+            org_id: The Org ID of the task
+            date: Date string (e.g., "today", "+1d", "2024-12-25")
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file(
+                "schedule.el", params={"org_id": org_id, "date": date}
+            )
+            if not result:
+                return False, "No response from Emacs"
+            if result == "NOT_FOUND":
+                return False, "Task not found"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, result.strip()
+        except Exception as e:
+            logging.error(f"Error scheduling: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def deadline(org_id: str, date: str) -> tuple[bool, str]:
+        """
+        Set a deadline for a task.
+
+        Args:
+            org_id: The Org ID of the task
+            date: Date string (e.g., "today", "+1d", "2024-12-25")
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file(
+                "deadline.el", params={"org_id": org_id, "date": date}
+            )
+            if not result:
+                return False, "No response from Emacs"
+            if result == "NOT_FOUND":
+                return False, "Task not found"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, result.strip()
+        except Exception as e:
+            logging.error(f"Error setting deadline: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def set_state(org_id: str, state: str) -> tuple[bool, str]:
+        """
+        Set the TODO state of a task.
+
+        Args:
+            org_id: The Org ID of the task
+            state: TODO state (e.g., "TODO", "DONE", "STRT")
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file(
+                "set-state.el", params={"org_id": org_id, "state": state}
+            )
+            if not result:
+                return False, "No response from Emacs"
+            if result == "NOT_FOUND":
+                return False, "Task not found"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, result.strip()
+        except Exception as e:
+            logging.error(f"Error setting state: {e}")
+            return False, str(e)
+
 
 @dataclass
 class Task:
