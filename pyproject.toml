@@ -2,11 +2,24 @@
 name = "org-warrior"
 version = "0.1.0"
 description = "TaskWarrior-like CLI interface for org-ql"
-requires-python = ">=3.9"
 
-[tool.ruff]
-line-length = 120
-target-version = "py39"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer (>=0.21.2,<0.22.0)",
+    "rich (>=14.3.2,<15.0.0)",
+    "python-emacs"
+]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[project.scripts]
+org-warrior = "org_warrior.main:app"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.2,<10.0.0)",
+    "pytest-cov (>=7.0.0,<8.0.0)"
+]
