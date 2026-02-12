@@ -1129,18 +1129,48 @@ def cmd_query(args):
 
 
 def cmd_start(args):
-    """Clock in to a task by ID from a filter context."""
+    """Clock in to a task by handle/org-id or by index from a filter context."""
     if not args:
-        print("Usage: org-warrior start <filter> <task-id>", file=sys.stderr)
+        print("Usage: org-warrior start <filter> <task-index|handle|org-id>", file=sys.stderr)
         print("Example: org-warrior start today 1", file=sys.stderr)
+        print("Example: org-warrior start alpha-lima-foxtrot", file=sys.stderr)
         return 1
 
     try:
         task_id = int(args[-1])
+        is_org_id = False
         filter_args = args[:-1]
     except ValueError:
-        print("Error: last argument must be a task ID (number).", file=sys.stderr)
-        return 1
+        org_id = _resolve_handle_or_fail(args[-1])
+        if not org_id:
+            return 1
+        is_org_id = True
+
+    if is_org_id:
+        elisp = f'''(progn
+          (require 'org)
+          (require 'org-id)
+          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
+            (if (not m)
+                (princ "NOT_FOUND")
+              (with-current-buffer (marker-buffer m)
+                (goto-char m)
+                (org-clock-in)
+                (save-buffer)
+                (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
+
+        try:
+            heading = emacs_eval(elisp).strip()
+        except RuntimeError as e:
+            print(f"Error clocking in: {e}", file=sys.stderr)
+            return 1
+
+        if heading == 'NOT_FOUND':
+            print(f"No entry found for ID {org_id}", file=sys.stderr)
+            return 1
+
+        print(f"✓ Clocked in to task: {heading}")
+        return 0
 
     query = _resolve_query_from_filter(filter_args)
     results = run_org_ql(query, select="full")
