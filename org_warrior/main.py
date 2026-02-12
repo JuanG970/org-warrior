@@ -5,6 +5,7 @@ import sys
 from typing import Optional
 import typer
 from rich.console import Console
+from rich.syntax import Syntax
 
 from org_warrior import config
 from org_warrior.Org import OrgQL
@@ -111,7 +112,8 @@ def show(
             body = OrgQL.get_task_body(org_id)
             console.print("\nBody:")
             if body and body.strip():
-                console.print(body)
+                body_nice = Syntax(body, "org", theme="monokai", word_wrap=True)
+                console.print(body_nice)
             else:
                 console.print("[dim](empty)[/dim]")
         except RuntimeError as e:
