@@ -89,17 +89,12 @@ class TestParseResult(unittest.TestCase):
 
     def test_parse_result_with_id(self):
         """Test parsing result line that includes an Org ID."""
-        # Import the parse_result function
+        import importlib.machinery
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location(
-            "org_warrior",
-            os.path.join(os.path.dirname(__file__), "..", "src", "org-warrior"),
-        )
-        if spec is None or spec.loader is None:
-            self.skipTest("Could not load org-warrior module")
-            return
-
+        src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "org-warrior")
+        loader = importlib.machinery.SourceFileLoader("org_warrior", src_path)
+        spec = importlib.util.spec_from_loader("org_warrior", loader, origin=src_path)
         org_warrior = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(org_warrior)
 
@@ -118,16 +113,12 @@ class TestParseResult(unittest.TestCase):
 
     def test_parse_result_without_id(self):
         """Test parsing result line without an Org ID (nil)."""
+        import importlib.machinery
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location(
-            "org_warrior",
-            os.path.join(os.path.dirname(__file__), "..", "src", "org-warrior"),
-        )
-        if spec is None or spec.loader is None:
-            self.skipTest("Could not load org-warrior module")
-            return
-
+        src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "org-warrior")
+        loader = importlib.machinery.SourceFileLoader("org_warrior", src_path)
+        spec = importlib.util.spec_from_loader("org_warrior", loader, origin=src_path)
         org_warrior = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(org_warrior)
 

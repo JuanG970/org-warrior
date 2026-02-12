@@ -4,6 +4,7 @@ org-warrior: A TaskWarrior-like CLI interface using org-ql as backend.
 Executes org-ql queries via Emacs in batch mode.
 """
 
+import configparser
 import subprocess
 import sys
 import os
@@ -15,7 +16,6 @@ import tempfile
 import uuid as _uuid
 from datetime import datetime, date
 from typing import Optional, Tuple
-
 
 
 def git_commit_org(message: str):
@@ -33,11 +33,39 @@ def git_commit_org(message: str):
     subprocess.run(['git', '-C', org_root, 'commit', '-m', message], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-# Configuration
-ORG_FILES = os.environ.get("ORG_WARRIOR_FILES", "~/org")
-EMACS_CMD = os.environ.get("EMACS_CMD", "emacsclient")
-EMACS_SERVER = os.environ.get("ORG_WARRIOR_SERVER", "edit")
-EMACS_LOAD_PATH = os.environ.get("ORG_WARRIOR_LOAD_PATH", "")
+# Configuration: config file < env vars < CLI flags
+CONFIG_DIR = os.path.expanduser("~/.org-warrior")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config")
+CONTEXT_FILE = os.path.join(CONFIG_DIR, "context")
+
+
+def _load_config():
+    """Load INI config from ~/.org-warrior/config."""
+    cfg = configparser.ConfigParser()
+    if os.path.isfile(CONFIG_FILE):
+        cfg.read(CONFIG_FILE)
+    return cfg
+
+
+_cfg = _load_config()
+
+def _cfgval(section, key, default=""):
+    try:
+        return _cfg.get(section, key)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return default
+
+
+ORG_FILES = os.environ.get("ORG_WARRIOR_FILES", _cfgval("core", "files", "~/org"))
+EMACS_CMD = os.environ.get("EMACS_CMD", _cfgval("core", "emacs_cmd", "emacsclient"))
+EMACS_SERVER = os.environ.get("ORG_WARRIOR_SERVER", _cfgval("core", "server", "edit"))
+EMACS_LOAD_PATH = os.environ.get("ORG_WARRIOR_LOAD_PATH", _cfgval("core", "load_path", ""))
+EMACS_TIMEOUT = 15
+DEFAULT_SORT = _cfgval("display", "default_sort", "")
+DEFAULT_LIMIT = _cfgval("display", "default_limit", "")
+CONFIG_COLOR = _cfgval("display", "color", "auto")
+CONFIG_SHOW_HANDLES = _cfgval("display", "show_handles", "true").lower() != "false"
+CONFIG_SHOW_IDS = _cfgval("display", "show_ids", "false").lower() == "true"
 
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -477,6 +505,39 @@ def build_load_path_elisp():
     return " ".join(elisp_parts)
 
 
+def _escape_elisp(s):
+    """Escape a string for safe embedding inside elisp double-quoted strings."""
+    return s.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _unescape_elisp_string(s):
+    """Unescape an elisp printed string (after removing outer quotes).
+
+    Handles standard escape sequences produced by Emacs ``prin1``:
+    ``\\\\`` → ``\\``, ``\\\"`` → ``\"``, ``\\n`` → newline, ``\\t`` → tab.
+    """
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == '\\' and i + 1 < len(s):
+            c = s[i + 1]
+            if c == 'n':
+                out.append('\n')
+            elif c == 't':
+                out.append('\t')
+            elif c == '"':
+                out.append('"')
+            elif c == '\\':
+                out.append('\\')
+            else:
+                out.append(c)
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return ''.join(out)
+
+
 def resolve_org_files(files_spec):
     """Return a list of .org files from a file/dir or path-separated list, including nested."""
     if isinstance(files_spec, (list, tuple)):
@@ -531,7 +592,7 @@ def emacs_eval_with_agenda(elisp: str, timeout: int = 15) -> str:
     out = (r.stdout or '').strip()
     if out.startswith('"') and out.endswith('"'):
         out = out[1:-1]
-    return out.replace('\\n', '\n').replace('\\"', '"')
+    return _unescape_elisp_string(out)
 
 
 def run_org_ql(query, files=None, select="heading"):
@@ -578,83 +639,129 @@ def run_org_ql(query, files=None, select="heading"):
         f"(progn {agenda_files_eval} {elisp})"
     ]
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=EMACS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("Error: emacsclient timed out (Emacs may be busy or waiting for input).", file=sys.stderr)
+        return []
     if result.returncode != 0 and result.stderr:
-        errors = [l for l in result.stderr.split('\n') 
+        errors = [l for l in result.stderr.split('\n')
                   if l and not l.startswith('Loading') and 'Warning' not in l]
         if errors:
             print(f"Error: {' '.join(errors)}", file=sys.stderr)
     
-    # emacsclient returns the result wrapped in quotes, strip them
+    # emacsclient returns the result wrapped in quotes; unescape the
+    # elisp printed string properly so inner s-expression escaping is
+    # preserved for the tokenizer.
     output = result.stdout.strip()
     if output.startswith('"') and output.endswith('"'):
         output = output[1:-1]
-    # Unescape newlines and quotes
-    output = output.replace('\\n', '\n').replace('\\"', '"')
+    output = _unescape_elisp_string(output)
     return output.split('\n') if output else []
+
+
+def _tokenize_sexp(s):
+    """Tokenize a flat s-expression into a list of Python values.
+
+    Handles escaped characters inside strings (\\\" → \", \\\\ → \\).
+    Returns strings, integers, and None (for nil).
+    """
+    tokens = []
+    i = 0
+    while i < len(s):
+        if s[i] in ' \t':
+            i += 1
+        elif s[i] == '"':
+            # Parse quoted string with escape handling
+            i += 1  # skip opening quote
+            chars = []
+            while i < len(s) and s[i] != '"':
+                if s[i] == '\\' and i + 1 < len(s):
+                    chars.append(s[i + 1])
+                    i += 2
+                else:
+                    chars.append(s[i])
+                    i += 1
+            i += 1  # skip closing quote
+            tokens.append(''.join(chars))
+        elif s[i:i + 3] == 'nil':
+            tokens.append(None)
+            i += 3
+        elif s[i].isdigit() or (s[i] == '-' and i + 1 < len(s) and s[i + 1].isdigit()):
+            j = i + 1 if s[i] != '-' else i + 2
+            while j < len(s) and s[j].isdigit():
+                j += 1
+            tokens.append(int(s[i:j]))
+            i = j
+        else:
+            i += 1  # skip parens and other delimiters
+    return tokens
 
 
 def parse_result(line):
     """Parse a result line from org-ql output."""
-    if line.startswith('('):
-        # Format: ("heading" "TODO" "A" deadline scheduled "filepath" lineno "ID")
-        # Deadline/scheduled/ID can be nil or "<date>"/"string"
-        match = re.match(
-            r'\("([^"]*)" (nil|"[^"]*") "([^"]*)" (nil|"[^"]*") (nil|"[^"]*") "([^"]*)" (\d+) (nil|"[^"]*")\)',
-            line
-        )
-        if match:
-            heading, todo, priority, deadline, scheduled, filepath, lineno, org_id = match.groups()
+    if line.startswith('(') and line.endswith(')'):
+        tokens = _tokenize_sexp(line[1:-1])
+        if len(tokens) == 8:
+            heading, todo, priority, deadline, scheduled, filepath, lineno, org_id = tokens
             return {
-                'heading': heading,
-                'todo': None if todo == 'nil' else todo.strip('"'),
-                'priority': priority if priority and priority != 'B' else None,  # B is default
-                'deadline': deadline.strip('"') if deadline != 'nil' else None,
-                'scheduled': scheduled.strip('"') if scheduled != 'nil' else None,
+                'heading': heading or '',
+                'todo': todo,
+                'priority': priority if priority and priority != 'B' else None,
+                'deadline': deadline,
+                'scheduled': scheduled,
                 'file': filepath,
-                'line': int(lineno),
-                'id': org_id.strip('"') if org_id != 'nil' else None
+                'line': lineno if isinstance(lineno, int) else None,
+                'id': org_id
             }
     return {'heading': line}
 
 
-def format_task(task, idx=None, show_ids=False, show_handles=True):
+def format_task(task, idx=None, show_ids=False, show_handles=True, show_file=False,
+                 idx_width=3, handle_width=0):
     """Format a task for display."""
     parts = []
     if idx is not None:
-        parts.append(colorize(f"{idx:3d}", None, dim=True))
-    
+        parts.append(colorize(f"{idx:>{idx_width}d}", None, dim=True))
+
     if show_handles:
-        handle = task.get("handle")
-        if handle:
+        handle = task.get("handle") or ""
+        if handle_width:
+            handle = f"{handle:<{handle_width}}"
+        if handle.strip():
             parts.append(colorize(handle, None, dim=True))
 
     if task.get('todo'):
         todo = task['todo']
         todo_color = TODO_COLORS.get(todo)
-        parts.append(colorize(f"[{todo}]", todo_color, bold=True))
-    
+        parts.append(colorize(f"[{todo:<7s}]", todo_color, bold=True))
+
     if task.get('priority'):
         priority = task['priority']
         pri_color = PRIORITY_COLORS.get(priority)
         parts.append(colorize(f"({priority})", pri_color, bold=True))
-    
+
     parts.append(colorize(task.get('heading', ''), None, bold=True))
-    
+
     deadline = format_date_label("DUE", task.get('deadline'))
     scheduled = format_date_label("SCH", task.get('scheduled'))
     if deadline:
         parts.append(deadline)
-    if scheduled and not deadline:
+    if scheduled:
         parts.append(scheduled)
-    
+
     if show_ids:
         org_id = task.get('id')
         if org_id:
             parts.append(colorize(f"ID:{org_id}", None, dim=True))
         else:
             parts.append(colorize("ID:", None, dim=True))
-    
+
+    if show_file:
+        filepath = task.get('file')
+        if filepath:
+            parts.append(colorize(os.path.basename(filepath), None, dim=True))
+
     return ' '.join(parts)
 
 
@@ -687,56 +794,162 @@ def format_task_detail(task, idx=None):
     return "\n".join(lines)
 
 
-def print_results(results, empty_msg="No tasks found.", show_ids=False, show_handles=True):
+SORT_KEYS = {
+    'priority': lambda t: ({'A': 0, 'B': 1, 'C': 2}.get(t.get('priority') or 'B', 1)),
+    'due': lambda t: (parse_org_timestamp(t.get('deadline') or '')[0] or date.max).isoformat(),
+    'scheduled': lambda t: (parse_org_timestamp(t.get('scheduled') or '')[0] or date.max).isoformat(),
+    'heading': lambda t: (t.get('heading') or '').lower(),
+}
+
+
+def print_results(results, empty_msg="No tasks found.", show_ids=False, show_handles=True,
+                  limit=None, sort_key=None, show_file=False):
     """Print formatted results."""
     if not results or (len(results) == 1 and not results[0]):
         print(empty_msg)
         return 0
 
+    total = len(results)
     cache, tasks, updated = ensure_handles_for_results(results) if show_handles else (None, [parse_result(l) for l in results], False)
     if updated:
         save_handle_cache(cache)
-    for i, task in enumerate(tasks, 1):
-        print(format_task(task, i, show_ids=show_ids, show_handles=show_handles))
-    
-    print(f"\n{len(results)} task(s)")
-    return len(results)
+    if sort_key and sort_key in SORT_KEYS:
+        tasks.sort(key=SORT_KEYS[sort_key])
+    display_tasks = tasks[:limit] if limit else tasks
+
+    # Compute column widths for alignment
+    idx_width = max(3, len(str(len(display_tasks))))
+    handle_width = max((len(t.get('handle') or '') for t in display_tasks), default=0)
+
+    for i, task in enumerate(display_tasks, 1):
+        print(format_task(task, i, show_ids=show_ids, show_handles=show_handles,
+                          show_file=show_file, idx_width=idx_width, handle_width=handle_width))
+
+    if limit and limit < total:
+        print(f"\nShowing {limit} of {total} task(s)")
+    else:
+        print(f"\n{total} task(s)")
+    return total
+
+
+def _resolve_query_from_filter(filter_args):
+    """Map common filter shorthand (today/next/week) to an org-ql query string."""
+    if not filter_args:
+        return '(and (todo) (not (done)))'
+    if filter_args[0] == 'today':
+        return '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
+    if filter_args[0] == 'next':
+        return '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
+    if filter_args[0] == 'week':
+        return '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
+    return build_query(filter_args)
+
+
+def _resolve_handle_or_fail(token):
+    """Resolve a handle/org-id token or print an error. Returns org_id or None."""
+    cache = load_handle_cache()
+    resolved, candidates = resolve_id_token(token, cache)
+    if candidates:
+        print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
+        for cand in candidates:
+            print(f"  {cand}", file=sys.stderr)
+        return None
+    if not resolved:
+        print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
+        return None
+    return resolved
+
+
+def _get_task_by_index(results, idx):
+    """Validate index and return parsed task dict, or None on error."""
+    if not results or (len(results) == 1 and not results[0]):
+        print("No tasks found for the given filter.", file=sys.stderr)
+        return None
+    if idx < 1 or idx > len(results):
+        print(f"Task ID {idx} out of range (1-{len(results)}).", file=sys.stderr)
+        return None
+    task = parse_result(results[idx - 1])
+    if not task.get('file') or not task.get('line'):
+        print("Error: could not determine task location.", file=sys.stderr)
+        return None
+    return task
 
 
 def cmd_task(args):
     """Show details for a single task by index from the given query (default list)."""
     if not args:
         print("Usage: org-warrior task <id> [filters]", file=sys.stderr)
-        return
+        return 1
     try:
         idx = int(args[0])
     except ValueError:
         print("Error: task id must be a number.", file=sys.stderr)
-        return
+        return 1
     query = build_query(args[1:])
     results = run_org_ql(query, select="full")
     if idx < 1 or idx > len(results):
         print(f"Task id {idx} out of range (1-{len(results)}).", file=sys.stderr)
-        return
+        return 1
     cache, tasks, updated = ensure_handles_for_results([results[idx - 1]])
     if updated:
         save_handle_cache(cache)
     print(format_task_detail(tasks[0], idx))
+    return 0
+
+
+def _parse_display_flags(args):
+    """Parse common display flags from args.
+
+    Returns dict with keys: show_ids, show_handles, limit, sort_key, show_file, args.
+    """
+    # Start with config-file defaults; CLI flags override
+    cfg_limit = None
+    if DEFAULT_LIMIT:
+        try:
+            cfg_limit = int(DEFAULT_LIMIT)
+        except ValueError:
+            pass
+    flags = {
+        'show_ids': CONFIG_SHOW_IDS,
+        'show_handles': CONFIG_SHOW_HANDLES,
+        'limit': cfg_limit,
+        'sort_key': DEFAULT_SORT or None,
+        'show_file': False,
+    }
+    remaining = list(args)
+    while remaining:
+        if remaining[0] in ('--ids', '--show-ids'):
+            flags['show_ids'] = True
+            remaining = remaining[1:]
+        elif remaining[0] == '--no-handles':
+            flags['show_handles'] = False
+            remaining = remaining[1:]
+        elif remaining[0] == '--limit' and len(remaining) > 1:
+            try:
+                flags['limit'] = int(remaining[1])
+            except ValueError:
+                print("Error: --limit requires a number.", file=sys.stderr)
+            remaining = remaining[2:]
+        elif remaining[0] == '--sort' and len(remaining) > 1:
+            flags['sort_key'] = remaining[1]
+            remaining = remaining[2:]
+        elif remaining[0] == '--show-file':
+            flags['show_file'] = True
+            remaining = remaining[1:]
+        else:
+            break
+    flags['args'] = remaining
+    return flags
 
 
 def cmd_list(args):
     """List tasks matching filters."""
-    show_ids = False
-    show_handles = True
-    if args and args[0] in ['--ids', '--show-ids']:
-        show_ids = True
-        args = args[1:]
-    if args and args[0] in ['--no-handles']:
-        show_handles = False
-        args = args[1:]
-    query = build_query(args)
+    f = _parse_display_flags(args)
+    query = build_query(f['args'])
     results = run_org_ql(query, select="full")
-    print_results(results, show_ids=show_ids, show_handles=show_handles)
+    print_results(results, show_ids=f['show_ids'], show_handles=f['show_handles'],
+                  limit=f['limit'], sort_key=f['sort_key'], show_file=f['show_file'])
+    return 0
 
 
 def cmd_next(args):
@@ -744,30 +957,26 @@ def cmd_next(args):
     query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
     results = run_org_ql(query, select="full")
     print_results(results, "No next actions found.")
+    return 0
 
 
 def cmd_today(args):
     """Show tasks due/scheduled up to today (overdue + today)."""
-    show_ids = False
-    show_handles = True
-    if args and args[0] in ['--ids', '--show-ids']:
-        show_ids = True
-        args = args[1:]
-    if args and args[0] in ['--no-handles']:
-        show_handles = False
-        args = args[1:]
-    # Include overdue deadlines/scheduled items as well as items happening today.
-    # Exclude DONE/CANCELLED via (not (done)).
+    f = _parse_display_flags(args)
     query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
     results = run_org_ql(query, select="full")
-    print_results(results, "No tasks for today.", show_ids=show_ids, show_handles=show_handles)
+    print_results(results, "No tasks for today.", show_ids=f['show_ids'], show_handles=f['show_handles'],
+                  limit=f['limit'], sort_key=f['sort_key'], show_file=f['show_file'])
+    return 0
 
 
 def cmd_week(args):
     """Show tasks for the coming week."""
+    f = _parse_display_flags(args)
     query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
     results = run_org_ql(query, select="full")
-    print_results(results, "No tasks for this week.")
+    print_results(results, "No tasks for this week.", limit=f['limit'], sort_key=f['sort_key'], show_file=f['show_file'])
+    return 0
 
 
 def cmd_overdue(args):
@@ -775,6 +984,7 @@ def cmd_overdue(args):
     query = '(and (not (done)) (deadline :to -1))'
     results = run_org_ql(query, select="full")
     print_results(results, "No overdue tasks.")
+    return 0
 
 
 def cmd_done(args):
@@ -782,6 +992,7 @@ def cmd_done(args):
     query = '(closed :from -7 :to today)'
     results = run_org_ql(query, select="full")
     print_results(results, "No recently completed tasks.")
+    return 0
 
 
 def cmd_projects(args):
@@ -789,38 +1000,40 @@ def cmd_projects(args):
     query = '(and (tags "project") (not (done)) (not (ancestors (tags "project"))))'
     results = run_org_ql(query, select="full")
     print_results(results, "No active projects.")
+    return 0
 
 
 def cmd_search(args):
     """Search tasks by text."""
     if not args:
         print("Usage: org-warrior search <pattern>", file=sys.stderr)
-        return
-    
+        return 1
     pattern = ' '.join(args)
-    query = f'(regexp "{pattern}")'
+    query = f'(regexp "{_escape_elisp(pattern)}")'
     results = run_org_ql(query, select="full")
     print_results(results, f"No tasks matching '{pattern}'.")
+    return 0
 
 
 def cmd_tag(args):
     """List tasks with a specific tag."""
     if not args:
         print("Usage: org-warrior tag <tagname>", file=sys.stderr)
-        return
-    
+        return 1
     tag = args[0]
-    query = f'(and (not (done)) (tags "{tag}"))'
+    query = f'(and (not (done)) (tags "{_escape_elisp(tag)}"))'
     results = run_org_ql(query, select="full")
     print_results(results, f"No tasks with tag '{tag}'.")
+    return 0
 
 
 def cmd_priority(args):
     """List tasks by priority."""
     pri = args[0].upper() if args else "A"
-    query = f'(and (not (done)) (priority "{pri}"))'
+    query = f'(and (not (done)) (priority "{_escape_elisp(pri)}"))'
     results = run_org_ql(query, select="full")
     print_results(results, f"No priority {pri} tasks.")
+    return 0
 
 
 def cmd_waiting(args):
@@ -828,6 +1041,7 @@ def cmd_waiting(args):
     query = '(todo "WAIT")'
     results = run_org_ql(query, select="full")
     print_results(results, "No waiting tasks.")
+    return 0
 
 
 def cmd_stuck(args):
@@ -835,17 +1049,83 @@ def cmd_stuck(args):
     query = '(and (tags "project") (not (done)) (not (ancestors (tags "project"))) (not (descendants (todo "STRT"))))'
     results = run_org_ql(query, select="full")
     print_results(results, "No stuck projects.")
+    return 0
+
+
+def cmd_open(args):
+    """Open a task in Emacs by handle, org-id, or index."""
+    if not args:
+        print("Usage: org-warrior open <handle|org-id|index N [filters]>", file=sys.stderr)
+        return 1
+
+    if args[0] == 'index':
+        if len(args) < 2:
+            print("Usage: org-warrior open index <N> [filters]", file=sys.stderr)
+            return 1
+        try:
+            idx = int(args[1])
+        except ValueError:
+            print("Error: index must be a number.", file=sys.stderr)
+            return 1
+        query = _resolve_query_from_filter(args[2:])
+        results = run_org_ql(query, select="full")
+        task = _get_task_by_index(results, idx)
+        if not task:
+            return 1
+        filepath, lineno = task['file'], task['line']
+    else:
+        org_id = _resolve_handle_or_fail(args[0])
+        if not org_id:
+            return 1
+        query = f'(property "ID" "{_escape_elisp(org_id)}")'
+        results = run_org_ql(query, select="full")
+        if not results or (len(results) == 1 and not results[0]):
+            print(f"No entry found for ID {org_id}", file=sys.stderr)
+            return 1
+        task = parse_result(results[0])
+        filepath = task.get('file')
+        lineno = task.get('line')
+        if not filepath or not lineno:
+            print("Error: could not determine task location.", file=sys.stderr)
+            return 1
+
+    cmd = [EMACS_CMD, "-s", EMACS_SERVER, f"+{lineno}", filepath]
+    try:
+        # Open without blocking to avoid hanging if Emacs is busy; user can then interact with Emacs to open the file if needed
+        subprocess.Popen(cmd)
+    except subprocess.TimeoutExpired:
+        print("Error: emacsclient timed out.", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_count(args):
+    """Print the number of tasks matching filters."""
+    if not args:
+        query = '(and (todo) (not (done)))'
+    elif args[0] == 'today':
+        query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
+    elif args[0] == 'week':
+        query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
+    elif args[0] == 'overdue':
+        query = '(and (not (done)) (deadline :to -1))'
+    else:
+        query = build_query(args)
+    results = run_org_ql(query, select="full")
+    count = len(results) if results and not (len(results) == 1 and not results[0]) else 0
+    print(count)
+    return 0
 
 
 def cmd_query(args):
     """Run a raw org-ql query."""
     if not args:
         print("Usage: org-warrior query '<org-ql-expression>'", file=sys.stderr)
-        return
-    
+        return 1
     query = ' '.join(args)
     results = run_org_ql(query, select="full")
     print_results(results, "No results.")
+    return 0
 
 
 def cmd_start(args):
@@ -853,81 +1133,86 @@ def cmd_start(args):
     if not args:
         print("Usage: org-warrior start <filter> <task-id>", file=sys.stderr)
         print("Example: org-warrior start today 1", file=sys.stderr)
-        return
-    
-    # Last argument should be the task ID
+        return 1
+
     try:
         task_id = int(args[-1])
         filter_args = args[:-1]
     except ValueError:
         print("Error: last argument must be a task ID (number).", file=sys.stderr)
-        return
-    
-    # Determine the query based on filter
-    if not filter_args:
-        query = '(and (todo) (not (done)))'
-    elif filter_args[0] == 'today':
-        query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
-    elif filter_args[0] == 'next':
-        query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
-    elif filter_args[0] == 'week':
-        query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
-    else:
-        query = build_query(filter_args)
-    
-    # Get the list of tasks
+        return 1
+
+    query = _resolve_query_from_filter(filter_args)
     results = run_org_ql(query, select="full")
-    
-    if not results or (len(results) == 1 and not results[0]):
-        print("No tasks found for the given filter.", file=sys.stderr)
-        return
-    
-    if task_id < 1 or task_id > len(results):
-        print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
-        return
-    
-    # Parse the task to get file and line number
-    task = parse_result(results[task_id - 1])
-    filepath = task.get('file')
-    lineno = task.get('line')
-    
-    if not filepath or not lineno:
-        print("Error: could not determine task location.", file=sys.stderr)
-        return
-    
-    # Build elisp to open file, go to line, and clock in
+    task = _get_task_by_index(results, task_id)
+    if not task:
+        return 1
+
+    filepath, lineno = task['file'], task['line']
     elisp = f'''(progn
-      (find-file "{filepath}")
+      (find-file "{_escape_elisp(filepath)}")
       (goto-char (point-min))
       (forward-line {lineno - 1})
       (org-clock-in))'''
-    
+
     cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=EMACS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("Error: emacsclient timed out.", file=sys.stderr)
+        return 1
+
     if result.returncode != 0:
         print(f"Error clocking in: {result.stderr}", file=sys.stderr)
-        return
-    
+        return 1
+
     print(f"✓ Clocked in to task {task_id}: {task.get('heading')}")
+    print("Tip: use handles for stable task references across operations.", file=sys.stderr)
+    return 0
+
+
+def _load_context():
+    """Load active context filter from ~/.org-warrior/context."""
+    if not os.path.isfile(CONTEXT_FILE):
+        return None
+    try:
+        with open(CONTEXT_FILE, "r", encoding="utf-8") as fh:
+            ctx = fh.read().strip()
+        return ctx if ctx and ctx != "none" else None
+    except OSError:
+        return None
+
+
+def _save_context(value):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONTEXT_FILE, "w", encoding="utf-8") as fh:
+        fh.write(value + "\n")
 
 
 def build_query(args):
-    """Build org-ql query from TaskWarrior-like filters."""
-    if not args:
+    """Build org-ql query from TaskWarrior-like filters.
+
+    Automatically prepends the active context filter if set.
+    """
+    ctx = _load_context()
+    ctx_args = [ctx] if ctx else []
+
+    if not args and not ctx_args:
         return '(and (todo) (not (done)))'
-    
+
+    all_args = ctx_args + list(args or [])
     conditions = ['(not (done))']
+    args = all_args
     
     for arg in args:
         if arg.startswith('+'):
-            conditions.append(f'(tags "{arg[1:]}")')
+            conditions.append(f'(tags "{_escape_elisp(arg[1:])}")')
         elif arg.startswith('project:'):
             conditions.append('(ancestors (tags "project"))')
         elif arg.startswith('pri:') or arg.startswith('priority:'):
             pri = arg.split(':')[1].upper()
-            conditions.append(f'(priority "{pri}")')
+            conditions.append(f'(priority "{_escape_elisp(pri)}")')
         elif arg.startswith('due:'):
             due = arg.split(':')[1]
             if due == 'today':
@@ -941,21 +1226,18 @@ def build_query(args):
             if sched == 'today':
                 conditions.append('(scheduled :on today)')
         else:
-            conditions.append(f'(regexp "{arg}")')
+            conditions.append(f'(regexp "{_escape_elisp(arg)}")')
     
     if len(conditions) == 1:
         return conditions[0]
     return f'(and {" ".join(conditions)})'
 
 
-
-
-
 def emacs_eval(elisp: str) -> str:
     """Evaluate ELisp in the running Emacs daemon and return stdout (stripped)."""
     cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=EMACS_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise RuntimeError('emacsclient timed out (Emacs may be busy or waiting for input)')
     if r.returncode != 0:
@@ -964,47 +1246,38 @@ def emacs_eval(elisp: str) -> str:
     # emacsclient prints strings with quotes
     if out.startswith('"') and out.endswith('"'):
         out = out[1:-1]
-    return out.replace('\\n', '\n').replace('\\"', '"')
+    return _unescape_elisp_string(out)
 
 
 def cmd_show(args):
     """Show a task by Org ID (preferred) or by list index (fallback)."""
     if not args:
         print("Usage: org-warrior show <HANDLE|ORG-ID> | show index <n> [filters]", file=sys.stderr)
-        return
+        return 1
     if args[0] == 'index':
         return cmd_task(args[1:])
-    org_id = args[0]
-    cache = load_handle_cache()
-    resolved, candidates = resolve_id_token(org_id, cache)
-    if candidates:
-        print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
-        for cand in candidates:
-            print(f"  {cand}", file=sys.stderr)
-        return
-    if not resolved:
-        print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
-        return
-    org_id = resolved
+    org_id = _resolve_handle_or_fail(args[0])
+    if not org_id:
+        return 1
     # org-ql property query (fast, avoids org-id global scan)
     query = f'(property "ID" "{org_id}")'
     results = run_org_ql(query, select="full")
     if not results or (len(results) == 1 and not results[0]):
-        print(f"No entry found for ID {org_id}")
-        return
+        print(f"No entry found for ID {org_id}", file=sys.stderr)
+        return 1
     cache, tasks, updated = ensure_handles_for_results([results[0]])
     if updated:
         save_handle_cache(cache)
     print(format_task_detail(tasks[0]))
-
+    return 0
 
 
 def cmd_add(args):
     """Add a new TODO to ~/org/inbox.org under 'Inbox' and create an org ID."""
     if not args:
         print("Usage: org-warrior add <title>", file=sys.stderr)
-        return
-    title = ' '.join(args).replace('\\', '\\\\').replace('"', '\\"')
+        return 1
+    title = _escape_elisp(' '.join(args))
     elisp = rf"""(progn
       (require 'org)
       (require 'org-id)
@@ -1031,42 +1304,36 @@ def cmd_add(args):
         save_handle_cache(cache)
     git_commit_org(f"org-warrior: add {new_id}")
     print(f"Created: {handle} (ID: {new_id})")
+    return 0
 
 
 def cmd_set_state(args):
     """Set TODO state for an entry by Org ID."""
     if len(args) < 2:
         print("Usage: org-warrior set-state <HANDLE|ORG-ID> <STATE>", file=sys.stderr)
-        return
-    cache = load_handle_cache()
-    resolved, candidates = resolve_id_token(args[0], cache)
-    if candidates:
-        print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
-        for cand in candidates:
-            print(f"  {cand}", file=sys.stderr)
-        return
-    if not resolved:
-        print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
-        return
-    org_id, state = resolved, args[1]
-    state = state.replace('"', '')
+        return 1
+    org_id = _resolve_handle_or_fail(args[0])
+    if not org_id:
+        return 1
+    state = args[1]
     elisp = rf"""(progn
       (require 'org)
       (require 'org-id)
-      (let ((m (org-id-find "{org_id}" t)))
+      (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
         (if (not m)
             (princ "NOT_FOUND")
           (with-current-buffer (marker-buffer m)
             (goto-char m)
-            (org-todo "{state}")
+            (org-todo "{_escape_elisp(state)}")
             (save-buffer)
             (princ "OK")))))"""
     out = emacs_eval(elisp).strip()
     if out == 'NOT_FOUND':
-        print(f"No entry found for ID {org_id}")
-    else:
-        git_commit_org(f"org-warrior: set-state {org_id} {state}")
-        print("✓ Updated")
+        print(f"No entry found for ID {org_id}", file=sys.stderr)
+        return 1
+    git_commit_org(f"org-warrior: set-state {org_id} {state}")
+    print("✓ Updated")
+    return 0
 
 
 def cmd_schedule(args):
@@ -1076,115 +1343,79 @@ def cmd_schedule(args):
         print("Example: org-warrior schedule \"6pm\" today 1", file=sys.stderr)
         print("Example: org-warrior schedule \"+1d\" +work 2", file=sys.stderr)
         print("Example: org-warrior schedule \"6pm\" abc123def456", file=sys.stderr)
-        return
-    
+        return 1
+
     date = args[0].replace('"', '')
-    
+
     # Check if last argument is an Org ID (not an integer)
     try:
         task_id = int(args[-1])
         is_org_id = False
         filter_args = args[1:-1]
     except ValueError:
-        # Last argument is not an int, treat as Org ID
-        cache = load_handle_cache()
-        resolved, candidates = resolve_id_token(args[-1], cache)
-        if candidates:
-            print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
-            for cand in candidates:
-                print(f"  {cand}", file=sys.stderr)
-            return
-        if not resolved:
-            print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
-            return
-        org_id = resolved
+        org_id = _resolve_handle_or_fail(args[-1])
+        if not org_id:
+            return 1
         is_org_id = True
-    
+
     if is_org_id:
-        # Schedule by Org ID directly using org-id-find
         elisp = f'''(progn
           (require 'org)
           (require 'org-id)
-          (let ((m (org-id-find "{org_id}" t)))
+          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
             (if (not m)
                 (princ "NOT_FOUND")
               (with-current-buffer (marker-buffer m)
                 (goto-char m)
-                (let ((d (format-time-string "%Y-%m-%d %H:%M" (org-read-date nil t "{date}"))))
+                (let ((d (format-time-string "%Y-%m-%d %H:%M" (org-read-date nil t "{_escape_elisp(date)}"))))
                   (org-schedule nil d))
                 (save-buffer)
                 (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
-        
+
         try:
             heading = emacs_eval(elisp).strip()
         except RuntimeError as e:
             print(f"Error scheduling: {e}", file=sys.stderr)
-            return
-        
+            return 1
+
         if heading == 'NOT_FOUND':
             print(f"No entry found for ID {org_id}", file=sys.stderr)
-            return
-        
+            return 1
+
         print(f"✓ Scheduled task: {heading}")
-        return
-    
-    # Original numeric index path
-    # Determine the query based on filter
-    if not filter_args:
-        query = '(and (todo) (not (done)))'
-    elif filter_args[0] == 'today':
-        query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
-    elif filter_args[0] == 'next':
-        query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
-    elif filter_args[0] == 'week':
-        query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
-    else:
-        query = build_query(filter_args)
-    
-    # Get the list of tasks
+        return 0
+
+    # Numeric index path
+    query = _resolve_query_from_filter(filter_args)
     results = run_org_ql(query, select="full")
-    
-    if not results or (len(results) == 1 and not results[0]):
-        print("No tasks found for the given filter.", file=sys.stderr)
-        return
-    
-    if task_id < 1 or task_id > len(results):
-        print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
-        print("Note: Filtered indices may change after scheduling tasks.", file=sys.stderr)
-        print("Consider using Org IDs for stable task references.", file=sys.stderr)
-        print("Use 'org-warrior list --ids' or 'org-warrior today --ids' to see task IDs.", file=sys.stderr)
-        return
-    
-    # Parse the task to get file and line number
-    task = parse_result(results[task_id - 1])
-    filepath = task.get('file')
-    lineno = task.get('line')
-    
-    if not filepath or not lineno:
-        print("Error: could not determine task location.", file=sys.stderr)
-        return
-    
-    # Build elisp to open file, go to line, and schedule
+    task = _get_task_by_index(results, task_id)
+    if not task:
+        return 1
+
+    filepath, lineno = task['file'], task['line']
     elisp = f'''(progn
-      (find-file "{filepath}")
+      (find-file "{_escape_elisp(filepath)}")
       (goto-char (point-min))
       (forward-line {lineno - 1})
-      (let ((d (format-time-string "%Y-%m-%d %H:%M" (org-read-date nil t "{date}"))))
+      (let ((d (format-time-string "%Y-%m-%d %H:%M" (org-read-date nil t "{_escape_elisp(date)}"))))
         (org-schedule nil d))
       (save-buffer))'''
-    
+
     cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
-    # Debug print
-    # print(f"Running command: {' '.join(cmd)}")
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=EMACS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("Error: emacsclient timed out.", file=sys.stderr)
+        return 1
+
     if result.returncode != 0:
         print(f"Error scheduling: {result.stderr}", file=sys.stderr)
-        return
-    
-    # git_commit_org(f"org-warrior: schedule {task.get('heading')} {date}")
+        return 1
+
     print(f"✓ Scheduled task {task_id}: {task.get('heading')}")
+    print("Tip: use handles for stable task references across operations.", file=sys.stderr)
+    return 0
 
 
 def cmd_deadline(args):
@@ -1194,114 +1425,166 @@ def cmd_deadline(args):
         print("Example: org-warrior deadline \"friday\" today 1", file=sys.stderr)
         print("Example: org-warrior deadline \"+7d\" +work 2", file=sys.stderr)
         print("Example: org-warrior deadline \"friday\" abc123def456", file=sys.stderr)
-        return
-    
+        return 1
+
     date = args[0].replace('"', '')
-    
+
     # Check if last argument is an Org ID (not an integer)
     try:
         task_id = int(args[-1])
         is_org_id = False
         filter_args = args[1:-1]
     except ValueError:
-        # Last argument is not an int, treat as Org ID
-        cache = load_handle_cache()
-        resolved, candidates = resolve_id_token(args[-1], cache)
-        if candidates:
-            print("Ambiguous handle prefix. Candidates:", file=sys.stderr)
-            for cand in candidates:
-                print(f"  {cand}", file=sys.stderr)
-            return
-        if not resolved:
-            print("Unknown handle. Run 'org-warrior handles-assign' or use full Org ID.", file=sys.stderr)
-            return
-        org_id = resolved
+        org_id = _resolve_handle_or_fail(args[-1])
+        if not org_id:
+            return 1
         is_org_id = True
-    
+
     if is_org_id:
-        # Set deadline by Org ID directly using org-id-find
         elisp = f'''(progn
           (require 'org)
           (require 'org-id)
-          (let ((m (org-id-find "{org_id}" t)))
+          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
             (if (not m)
                 (princ "NOT_FOUND")
               (with-current-buffer (marker-buffer m)
                 (goto-char m)
-                (let ((d (org-read-date nil nil "{date}")))
+                (let ((d (org-read-date nil nil "{_escape_elisp(date)}")))
                   (org-deadline nil d))
                 (save-buffer)
                 (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
-        
+
         try:
             heading = emacs_eval(elisp).strip()
         except RuntimeError as e:
             print(f"Error setting deadline: {e}", file=sys.stderr)
-            return
-        
+            return 1
+
         if heading == 'NOT_FOUND':
             print(f"No entry found for ID {org_id}", file=sys.stderr)
-            return
-        
+            return 1
+
         git_commit_org(f"org-warrior: deadline {heading} {date}")
         print(f"✓ Set deadline for task: {heading}")
-        return
-    
-    # Original numeric index path
-    # Determine the query based on filter
-    if not filter_args:
-        query = '(and (todo) (not (done)))'
-    elif filter_args[0] == 'today':
-        query = '(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))'
-    elif filter_args[0] == 'next':
-        query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
-    elif filter_args[0] == 'week':
-        query = '(or (deadline :from today :to +7) (scheduled :from today :to +7))'
-    else:
-        query = build_query(filter_args)
-    
-    # Get the list of tasks
+        return 0
+
+    # Numeric index path
+    query = _resolve_query_from_filter(filter_args)
     results = run_org_ql(query, select="full")
-    
-    if not results or (len(results) == 1 and not results[0]):
-        print("No tasks found for the given filter.", file=sys.stderr)
-        return
-    
-    if task_id < 1 or task_id > len(results):
-        print(f"Task ID {task_id} out of range (1-{len(results)}).", file=sys.stderr)
-        print("Note: Filtered indices may change after setting deadlines.", file=sys.stderr)
-        print("Consider using Org IDs for stable task references.", file=sys.stderr)
-        print("Use 'org-warrior list --ids' or 'org-warrior today --ids' to see task IDs.", file=sys.stderr)
-        return
-    
-    # Parse the task to get file and line number
-    task = parse_result(results[task_id - 1])
-    filepath = task.get('file')
-    lineno = task.get('line')
-    
-    if not filepath or not lineno:
-        print("Error: could not determine task location.", file=sys.stderr)
-        return
-    
-    # Build elisp to open file, go to line, and set deadline
+    task = _get_task_by_index(results, task_id)
+    if not task:
+        return 1
+
+    filepath, lineno = task['file'], task['line']
     elisp = f'''(progn
-      (find-file "{filepath}")
+      (find-file "{_escape_elisp(filepath)}")
       (goto-char (point-min))
       (forward-line {lineno - 1})
-      (let ((d (org-read-date nil nil "{date}")))
+      (let ((d (org-read-date nil nil "{_escape_elisp(date)}")))
         (org-deadline nil d))
       (save-buffer))'''
-    
+
     cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", elisp]
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=EMACS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("Error: emacsclient timed out.", file=sys.stderr)
+        return 1
+
     if result.returncode != 0:
         print(f"Error setting deadline: {result.stderr}", file=sys.stderr)
-        return
-    
+        return 1
+
     git_commit_org(f"org-warrior: deadline {task.get('heading')} {date}")
     print(f"✓ Set deadline for task {task_id}: {task.get('heading')}")
+    print("Tip: use handles for stable task references across operations.", file=sys.stderr)
+    return 0
+
+
+def cmd_context(args):
+    """Get or set persistent context filter."""
+    if not args:
+        ctx = _load_context()
+        if ctx:
+            print(f"Active context: {ctx}")
+        else:
+            print("No active context.")
+        return 0
+    value = args[0]
+    if value == "none":
+        if os.path.isfile(CONTEXT_FILE):
+            os.unlink(CONTEXT_FILE)
+        print("Context cleared.")
+        return 0
+    _save_context(value)
+    print(f"Context set: {value}")
+    return 0
+
+
+def cmd_modify(args):
+    """Apply an action to all tasks matching filters.
+
+    Usage: org-warrior modify <filters...> set-state <STATE>
+    """
+    if len(args) < 2:
+        print("Usage: org-warrior modify <filters...> set-state <STATE>", file=sys.stderr)
+        return 1
+    # Find the action keyword
+    action_idx = None
+    for i, a in enumerate(args):
+        if a == "set-state" and i + 1 < len(args):
+            action_idx = i
+            break
+    if action_idx is None:
+        print("Error: only 'set-state <STATE>' is currently supported.", file=sys.stderr)
+        return 1
+
+    filter_args = args[:action_idx]
+    state = args[action_idx + 1]
+    query = build_query(filter_args) if filter_args else '(and (todo) (not (done)))'
+    results = run_org_ql(query, select="full")
+    if not results or (len(results) == 1 and not results[0]):
+        print("No matching tasks.", file=sys.stderr)
+        return 1
+
+    cache, tasks, updated = ensure_handles_for_results(results)
+    if updated:
+        save_handle_cache(cache)
+    print(f"Will set state to {state} for {len(tasks)} task(s):")
+    for i, t in enumerate(tasks, 1):
+        print(f"  {i}. {t.get('heading', '')}")
+    answer = input("Proceed? [y/N] ").strip().lower()
+    if answer != "y":
+        print("Aborted.")
+        return 0
+
+    ok = 0
+    for t in tasks:
+        org_id = t.get("id")
+        if not org_id:
+            print(f"  Skipping (no ID): {t.get('heading', '')}", file=sys.stderr)
+            continue
+        elisp = rf"""(progn
+          (require 'org) (require 'org-id)
+          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
+            (if (not m) (princ "NOT_FOUND")
+              (with-current-buffer (marker-buffer m)
+                (goto-char m)
+                (org-todo "{_escape_elisp(state)}")
+                (save-buffer)
+                (princ "OK")))))"""
+        try:
+            out = emacs_eval(elisp).strip()
+            if out == "OK":
+                ok += 1
+            else:
+                print(f"  Not found: {t.get('heading', '')}", file=sys.stderr)
+        except RuntimeError as e:
+            print(f"  Error: {e}", file=sys.stderr)
+    git_commit_org(f"org-warrior: modify set-state {state} ({ok} tasks)")
+    print(f"✓ Updated {ok} of {len(tasks)} task(s).")
+    return 0
 
 
 def cmd_jira_sync(args):
@@ -1309,6 +1592,7 @@ def cmd_jira_sync(args):
     elisp = """(progn (require 'org-jira) (org-jira-get-issues) (princ "OK"))"""
     out = emacs_eval(elisp).strip()
     print("✓ Jira sync triggered" if out == 'OK' else out)
+    return 0
 
 
 def cmd_handles_assign(args):
@@ -1317,9 +1601,9 @@ def cmd_handles_assign(args):
         print("Usage: org-warrior handles-assign", file=sys.stderr)
         print("  Scans org files for existing IDs and caches handles.", file=sys.stderr)
         print("  Warns about headings without IDs (use Emacs hooks to create them).", file=sys.stderr)
-        return
-    
+        return 1
     scan_and_cache_handles()
+    return 0
 
 
 def print_help():
@@ -1328,114 +1612,118 @@ def print_help():
 org-warrior - TaskWarrior-like interface for org-ql
 
 USAGE:
-    org-warrior <command> [options]
+    org-warrior [-f <file>] <command> [options]
 
 COMMANDS:
-    list [--ids] [--no-handles] [filters]       List tasks (default command)
-    show <HANDLE|ORG-ID>        Show details for a task by handle or org ID
-    task <id> [filters]  Show details for a task by index
-    next                 Show next actions
-    today [--ids] [--no-handles]        Tasks due/scheduled today
-    week                 Tasks for the coming week
-    overdue              Overdue tasks
-    done                 Recently completed tasks
-    projects             Active projects
-    stuck                Stuck projects (no NEXT actions)
-    waiting              Waiting tasks
-    tag <name>           Tasks with specific tag
-    priority <A|B|C>     Tasks by priority
-    search <pattern>     Search tasks by text
-    query <expr>         Run raw org-ql expression
-    start <date> [filter] <id>     Clock in to a task
-    schedule <date> [filter] <id|handle|org-id>  Schedule a task
-    deadline <date> [filter] <id|handle|org-id>  Set deadline for a task
-    add <title>          Add new TODO to inbox
-    set-state <HANDLE|ORG-ID> <STATE>     Set TODO state by handle or org ID
-    handles-assign      Scan org files for existing IDs and cache handles
-    jira-sync            Trigger org-jira sync
+  Read:
+    list [filters] [options]    List tasks (default command)
+    today [options]             Tasks due/scheduled today (includes overdue)
+    week [options]              Tasks for the coming week
+    next                        Next actions (STRT or priority A TODO)
+    overdue                     Overdue deadline tasks
+    done                        Recently completed tasks (last 7 days)
+    projects                    Active projects
+    stuck                       Stuck projects (no NEXT actions)
+    waiting                     Waiting tasks
+    tag <name>                  Tasks with specific tag
+    priority <A|B|C>            Tasks by priority
+    search <pattern>            Search tasks by text (regexp)
+    query <expr>                Run raw org-ql expression
+    count [today|week|overdue|filters]  Print number of matching tasks
+    show <handle|org-id>        Show task details
+    task <id> [filters]         Show task details by numeric index
+    open <handle|org-id>        Open task in Emacs
+    open index <N> [filters]    Open Nth task from filter in Emacs
+
+  Write:
+    add <title>                 Add new TODO to ~/org/inbox.org
+    set-state <handle|org-id> <STATE>  Set TODO state
+    schedule <date> [filter] <id|handle>  Schedule a task
+    deadline <date> [filter] <id|handle>  Set deadline
+    start [filter] <id>         Clock in to a task by numeric index
+    modify <filters> set-state <STATE>  Bulk set state for matching tasks
+
+  Meta:
+    context [<filter>|none]     Get/set persistent context filter
+    handles-assign              Scan org files and cache handles
+    jira-sync                   Trigger org-jira sync
+
+CONCEPTS:
+    handle      Deterministic 3-word name derived from Org ID (e.g., paper-salmon-quiet).
+                Case insensitive, supports unique prefix matching.
+    org-id      UUID stored as :ID: property on Org headings. Stable across operations.
+    index       Numeric position in a filtered list (1-based). Unstable across operations.
+
+    Prefer handles or org-ids for write operations. Numeric indices may shift
+    after any modification.
 
 OPTIONS:
-    --no-color          Disable colored output (also supports NO_COLOR)
-    --ids, --show-ids   Show Org IDs in list/today commands
-    --no-handles        Hide handles in list/today commands
+    -f, --file <path>    Restrict queries to a single org file
+    --no-color           Disable colored output (also supports NO_COLOR env)
+    --ids, --show-ids    Show Org IDs in output
+    --no-handles         Hide handles in output
+    --limit N            Show only first N tasks
+    --sort <key>         Sort by: priority, due, scheduled, heading
+    --show-file          Show source filename for each task
 
-HANDLES:
-    org-warrior uses friendly handles derived from Org IDs for human-friendly task references.
-    
-    - Handles are deterministic 3-word names like: paper-salmon-quiet, golf-echo-charlie
-    - Only works with tasks that have Org IDs (:ID: properties)  
-    - handles-assign scans for existing IDs but does NOT create new ones
-    - ID creation is handled by your Emacs configuration (see SETUP below)
-
-SETUP (Required for handles):
-    Add this to your Emacs config (~/.doom.d/config.el for Doom):
-    
-        (defun org-warrior/ensure-ids-on-save ()
-          "Ensure all headings have IDs before saving."
-          (when (eq major-mode 'org-mode)
-            (save-excursion
-              (org-map-entries
-               (lambda ()
-                 (unless (org-id-get)
-                   (org-id-get-create)))))))
-        
-        (add-hook 'before-save-hook 'org-warrior/ensure-ids-on-save)
-    
-    Then restart Emacs and save your org files to generate IDs automatically.
-
-FILTERS (for list command):
+FILTERS:
     +tag              Filter by tag
     project:          Filter to project subtasks
-    pri:A             Filter by priority
+    pri:A             Filter by priority (A, B, C)
     due:today         Due today
     due:week          Due this week
     due:overdue       Overdue items
     scheduled:today   Scheduled today
-    <text>            Text search
+    <text>            Text search (regexp)
+
+CONFIG:
+    ~/.org-warrior/config   INI config file (optional)
+
+    [core]
+    files = ~/org           # Same as ORG_WARRIOR_FILES
+    server = edit           # Same as ORG_WARRIOR_SERVER
+    emacs_cmd = emacsclient # Same as EMACS_CMD
+
+    [display]
+    default_sort =          # Default sort key
+    default_limit =         # Default limit
+    color = auto            # auto, true, false
+    show_handles = true
+    show_ids = false
+
+    Env vars override config; CLI flags override both.
 
 ENVIRONMENT:
-    ORG_WARRIOR_FILES   Path(s) to org files or directories (os.pathsep-separated, recursive; default: ~/org)
-    EMACS_CMD           Emacs command (default: emacsclient)
+    ORG_WARRIOR_FILES   Path(s) to org files/directories (default: ~/org)
+    EMACS_CMD           Emacs client command (default: emacsclient)
     ORG_WARRIOR_SERVER  Emacs server name (default: edit)
 
-WORKFLOW EXAMPLES:
-    # 1. First-time setup: scan for existing IDs and cache handles  
-    org-warrior handles-assign
-    # Output: Found 46 IDs out of 991 headings, ⚠️ 945 headings missing IDs
-    
-    # 2. Regular usage: list tasks (shows handles by default)
-    org-warrior list
-    # Output: 1 paper-salmon-quiet [TODO] Fix bug in parser
-    
-    # 3. Use handles for task operations  
-    org-warrior show paper-salmon-quiet           # Show task details
-    org-warrior schedule "tomorrow" paper-salmon-quiet  # Schedule by handle
-    org-warrior set-state paper-salmon-quiet DONE  # Complete task
-    
-    # 4. View tasks with different ID formats
-    org-warrior list --ids                        # Show org-IDs alongside
-    org-warrior list --no-handles                 # Hide handles, show only TODO states
-    
-    # 5. Handle resolution (case insensitive, supports prefixes)
-    org-warrior show paper-salmon-quiet           # Full handle
-    org-warrior show paper-salmon                 # Unique prefix works
-    org-warrior show paper                        # Shows error if ambiguous
-
-OTHER EXAMPLES:
+EXAMPLES:
     org-warrior                                   # List all open tasks
-    org-warrior today --ids                       # Today's tasks with Org IDs  
-    org-warrior +work due:week                    # Work tasks due this week
-    org-warrior search meeting                    # Search for 'meeting'
-    org-warrior show index 1 scheduled:today     # Show first task from today's scheduled  
-    org-warrior query '(todo "STRT")'            # Raw org-ql query
-    org-warrior start today 1                    # Clock in to first task from today
-    org-warrior deadline "friday" +work 2        # Set deadline to friday for 2nd work task
+    org-warrior list --limit 5 --sort priority    # Top 5 by priority
+    org-warrior today --show-file                 # Today's tasks with filenames
+    org-warrior count today                       # Number for status bar
+    org-warrior open paper-salmon-quiet           # Open in Emacs
+    org-warrior context +work                     # Set persistent filter
+    org-warrior list                              # Now filtered to +work
+    org-warrior context none                      # Clear filter
+    org-warrior modify +old set-state DONE        # Bulk complete tasks
+    org-warrior -f ~/org/inbox.org list           # Single file
+    org-warrior schedule "tomorrow" paper-salmon  # Schedule by handle prefix
+    org-warrior deadline "friday" +work 2         # Deadline by index
 
-NOTES:
-    - handles-assign only scans existing IDs, does not create them
-    - ID creation happens in Emacs when you save org files (with proper config)
-    - Handles are cached in ~/.org-warrior/handles.json
-    - Run handles-assign after adding IDs to update the handle cache
+SETUP (Required for handles):
+    Add to your Emacs config (~/.doom.d/config.el for Doom):
+
+        (defun org-warrior/ensure-ids-on-save ()
+          (when (eq major-mode 'org-mode)
+            (save-excursion
+              (org-map-entries
+               (lambda () (unless (org-id-get) (org-id-get-create)))))))
+
+        (add-hook 'before-save-hook 'org-warrior/ensure-ids-on-save)
+
+    Then save your org files to generate IDs, and run: org-warrior handles-assign
 """
     print(help_text.strip())
 
@@ -1447,12 +1735,27 @@ def main():
         print_help()
         return
 
-    if args[0] == '--no-color':
+    if args[0] == '--no-color' or CONFIG_COLOR == "false":
         set_color_mode(False)
         args = args[1:]
     else:
         set_color_mode(True)
-    
+
+    # Global --file / -f flag: restrict queries to a single file
+    global ORG_FILES
+    for i, a in enumerate(args):
+        if a in ('-f', '--file'):
+            if i + 1 >= len(args):
+                print("Error: --file requires a path argument.", file=sys.stderr)
+                sys.exit(1)
+            fpath = os.path.expanduser(args[i + 1])
+            if not os.path.isfile(fpath):
+                print(f"Error: file not found: {fpath}", file=sys.stderr)
+                sys.exit(1)
+            ORG_FILES = fpath
+            args = args[:i] + args[i + 2:]
+            break
+
     commands = {
         'list': cmd_list,
         'show': cmd_show,
@@ -1469,22 +1772,26 @@ def main():
         'priority': cmd_priority,
         'search': cmd_search,
         'query': cmd_query,
+        'count': cmd_count,
+        'open': cmd_open,
         'start': cmd_start,
         'schedule': cmd_schedule,
         'deadline': cmd_deadline,
         'jira-sync': cmd_jira_sync,
         'handles-assign': cmd_handles_assign,
-    
+        'context': cmd_context,
+        'modify': cmd_modify,
         'add': cmd_add,
     }
     
     cmd = args[0]
     cmd_args = args[1:]
-    
+
     if cmd in commands:
-        commands[cmd](cmd_args)
+        rc = commands[cmd](cmd_args)
     else:
-        cmd_list(args)
+        rc = cmd_list(args)
+    sys.exit(rc or 0)
 
 
 if __name__ == '__main__':

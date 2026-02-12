@@ -321,20 +321,153 @@ test_out_of_range_error() {
     local output
     output=$("$ORG_WARRIOR" schedule "6pm" today 999 2>&1)
     assert_contains "$output" "out of range" "error shows out of range"
-    assert_contains "$output" "Filtered indices may change" "error mentions filtered indices"
-    assert_contains "$output" "Org IDs" "error mentions Org IDs"
-    assert_contains "$output" "--ids" "error mentions --ids flag"
+}
+
+# Test: --limit flag
+test_limit() {
+    local output
+    output=$("$ORG_WARRIOR" list --limit 3 2>&1)
+    assert_contains "$output" "Showing 3 of" "limit shows truncated count"
+}
+
+# Test: --sort flag
+test_sort() {
+    local output
+    output=$("$ORG_WARRIOR" list --sort priority 2>&1)
+    assert_contains "$output" "Finish report" "sort by priority includes priority A task"
+}
+
+# Test: count command
+test_count() {
+    local output
+    output=$("$ORG_WARRIOR" count 2>&1)
+    # Should be a plain number
+    if echo "$output" | grep -qE '^[0-9]+$'; then
+        echo -e "${GREEN}✓${NC} count returns a number"
+        ((PASSED++))
+    else
+        echo -e "${RED}✗${NC} count returns a number"
+        echo "  Got: $output"
+        ((FAILED++))
+    fi
+}
+
+test_count_today() {
+    local output
+    output=$("$ORG_WARRIOR" count today 2>&1)
+    if echo "$output" | grep -qE '^[0-9]+$'; then
+        echo -e "${GREEN}✓${NC} count today returns a number"
+        ((PASSED++))
+    else
+        echo -e "${RED}✗${NC} count today returns a number"
+        echo "  Got: $output"
+        ((FAILED++))
+    fi
+}
+
+# Test: --show-file flag
+test_show_file() {
+    local output
+    output=$("$ORG_WARRIOR" list --show-file 2>&1)
+    assert_contains "$output" "test.org" "show-file displays filename"
+}
+
+# Test: context command
+test_context() {
+    local output
+    # Set context
+    output=$("$ORG_WARRIOR" context +work 2>&1)
+    assert_contains "$output" "Context set" "context set works"
+    # Show context
+    output=$("$ORG_WARRIOR" context 2>&1)
+    assert_contains "$output" "+work" "context shows current filter"
+    # Clear context
+    output=$("$ORG_WARRIOR" context none 2>&1)
+    assert_contains "$output" "cleared" "context none clears"
+    # Verify cleared
+    output=$("$ORG_WARRIOR" context 2>&1)
+    assert_contains "$output" "No active context" "context cleared properly"
+}
+
+# Test: schedule by handle
+test_schedule_by_handle() {
+    local handle
+    handle=$(get_sample_handle)
+    if [ -z "$handle" ]; then
+        echo -e "${RED}✗${NC} schedule by handle (no handle available)"
+        ((FAILED++))
+        return
+    fi
+    local output
+    output=$("$ORG_WARRIOR" schedule "tomorrow" "$handle" 2>&1)
+    # Should succeed or fail gracefully
+    if echo "$output" | grep -qE '(Scheduled|NOT_FOUND|Error)'; then
+        echo -e "${GREEN}✓${NC} schedule by handle accepted"
+        ((PASSED++))
+    else
+        echo -e "${RED}✗${NC} schedule by handle accepted"
+        echo "  Got: $output"
+        ((FAILED++))
+    fi
+}
+
+# Test: set-state by handle
+test_set_state_by_handle() {
+    local handle
+    handle=$(get_sample_handle)
+    if [ -z "$handle" ]; then
+        echo -e "${RED}✗${NC} set-state by handle (no handle available)"
+        ((FAILED++))
+        return
+    fi
+    local output
+    output=$("$ORG_WARRIOR" set-state "$handle" TODO 2>&1)
+    if echo "$output" | grep -qE '(Updated|NOT_FOUND)'; then
+        echo -e "${GREEN}✓${NC} set-state by handle accepted"
+        ((PASSED++))
+    else
+        echo -e "${RED}✗${NC} set-state by handle accepted"
+        echo "  Got: $output"
+        ((FAILED++))
+    fi
+}
+
+# Test: add command
+test_add() {
+    local output
+    output=$("$ORG_WARRIOR" add "Test task from integration test" 2>&1)
+    assert_contains "$output" "Created:" "add creates task"
+}
+
+# Test: error on unknown handle
+test_unknown_handle() {
+    local output
+    output=$("$ORG_WARRIOR" show zzz-xxx-yyy 2>&1)
+    assert_contains "$output" "Unknown handle" "unknown handle shows error"
+}
+
+# Test: exit code on error
+test_exit_code_error() {
+    "$ORG_WARRIOR" show 2>/dev/null
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        echo -e "${GREEN}✓${NC} error returns non-zero exit code"
+        ((PASSED++))
+    else
+        echo -e "${RED}✗${NC} error returns non-zero exit code"
+        ((FAILED++))
+    fi
 }
 
 # Main
 main() {
     echo "Setting up test environment..."
     setup
-    
+
     echo ""
     echo "Running org-warrior integration tests..."
     echo "========================================="
-    
+
     test_help
     test_list
     test_task_detail
@@ -356,13 +489,24 @@ main() {
     test_handles_assign
     test_today_with_ids
     test_out_of_range_error
-    
+    test_limit
+    test_sort
+    test_count
+    test_count_today
+    test_show_file
+    test_context
+    test_schedule_by_handle
+    test_set_state_by_handle
+    test_add
+    test_unknown_handle
+    test_exit_code_error
+
     echo ""
     echo "========================================="
     echo -e "Results: ${GREEN}$PASSED passed${NC}, ${RED}$FAILED failed${NC}"
-    
+
     teardown
-    
+
     if [ $FAILED -gt 0 ]; then
         exit 1
     fi

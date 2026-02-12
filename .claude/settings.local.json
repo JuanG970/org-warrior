@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/juangonzalez/PersonalProjects/org-warrior/src/org-warrior:*)",
+      "Bash(python3 -m pytest:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}

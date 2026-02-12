@@ -1,3 +1,16 @@
 # OpenCode / agent scratch
 .agent-shell/
 __pycache__/
+
+# Python
+.venv/
+*.pyc
+*.egg-info/
+dist/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+
+# OS
+.DS_Store
