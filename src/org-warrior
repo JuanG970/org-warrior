@@ -242,163 +242,6 @@ def ensure_handles_for_results(results: list) -> Tuple[dict, list, bool]:
         tasks.append(task)
     return cache, tasks, updated
 
-
-def scan_and_cache_handles() -> None:
-    """Scan org files for existing IDs and populate handle cache. Warn about missing IDs."""
-    
-    print("Scanning org files for existing IDs...")
-    
-    # Option 1: Use Emacs org-map-entries for better integration (when available)
-    try:
-        emacs_eval("(+ 1 1)")  # Test connectivity
-        print("Using Emacs for scanning...")
-        
-        scan_elisp = """(progn
-  (require 'org)
-  (let ((results '())
-        (total-headings 0)
-        (headings-with-ids 0)
-        (headings-without-ids '()))
-    (dolist (f (org-agenda-files))
-      (condition-case err
-        (with-current-buffer (find-file-noselect f)
-          (org-map-entries
-           (lambda ()
-             (setq total-headings (1+ total-headings))
-             (let ((id (org-entry-get nil "ID"))
-                   (heading (org-get-heading t t t t))
-                   (file (buffer-file-name))
-                   (line (line-number-at-pos)))
-               (if id
-                   (progn
-                     (setq headings-with-ids (1+ headings-with-ids))
-                     (push (list "ID" id heading file line) results))
-                 (push (list "NO_ID" "" heading file line) headings-without-ids))))
-           nil 'file))
-        (error (message "Error processing file %s: %s" f err))))
-    (push (list "SUMMARY" total-headings headings-with-ids (length headings-without-ids)) results)
-    (dolist (item (append results headings-without-ids))
-      (princ (format "%s|%s|%s|%s|%s\\n" 
-                     (nth 0 item) (nth 1 item) (nth 2 item) (nth 3 item) (nth 4 item))))))"""
-        
-        output = emacs_eval_with_agenda(scan_elisp, timeout=60)
-        
-        cache = load_handle_cache()
-        wordlist = load_wordlist()
-        updated = False
-        found_ids = []
-        missing_headings = []
-        
-        for line in output.splitlines():
-            parts = line.strip().strip('"').split('|')
-            if len(parts) >= 5:
-                status, org_id, heading, file_path, line_num = parts
-                
-                if status == "SUMMARY":
-                    total_headings = int(org_id)
-                    headings_with_ids = int(heading)
-                    headings_without = int(file_path)
-                    print(f"Found {headings_with_ids} IDs out of {total_headings} headings")
-                    if headings_without > 0:
-                        print(f"⚠️  {headings_without} headings are missing IDs")
-                elif status == "ID" and org_id:
-                    found_ids.append(org_id)
-                    _, created = ensure_handle_for_uuid(org_id, cache, wordlist)
-                    updated = updated or created
-                elif status == "NO_ID":
-                    missing_headings.append((heading, file_path, line_num))
-        
-        # Show some examples of headings without IDs
-        if missing_headings:
-            print("\nExamples of headings without IDs:")
-            for i, (heading, file_path, line_num) in enumerate(missing_headings[:5]):
-                rel_path = os.path.relpath(file_path, os.path.expanduser("~"))
-                print(f"  • {heading} ({rel_path}:{line_num})")
-            if len(missing_headings) > 5:
-                print(f"  ... and {len(missing_headings) - 5} more")
-            
-            print(f"\n💡 To create missing IDs:")
-            print("  1. Make sure your Emacs config has the org-warrior/ensure-ids-on-save hook")
-            print("  2. Open and save the org files (IDs will be created automatically)")
-            print("  3. Or use: SPC m i b (in Doom) to add IDs to current buffer")
-        
-    except Exception as e:
-        # Fallback: Manual file parsing (no Emacs needed)
-        print(f"Emacs not available, using file parsing... ({e})")
-        
-        cache = load_handle_cache()
-        wordlist = load_wordlist()
-        updated = False
-        total_headings = 0
-        found_ids = 0
-        missing_examples = []
-        
-        files = resolve_org_files(ORG_FILES)
-        for file_path in files:
-            if not os.path.isfile(file_path):
-                continue
-                
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                    
-                for line_num, line in enumerate(lines, 1):
-                    # Find headings
-                    heading_match = re.match(r'^(\*+)\s+(.+)', line)
-                    if heading_match:
-                        total_headings += 1
-                        heading_text = heading_match.group(2).strip()
-                        
-                        # Look for ID property in following lines
-                        has_id = False
-                        org_id = None
-                        for i in range(line_num, min(line_num + 10, len(lines))):
-                            if i < len(lines):
-                                id_match = re.match(r'\s*:ID:\s+([a-fA-F0-9-]+)', lines[i])
-                                if id_match:
-                                    has_id = True
-                                    org_id = id_match.group(1)
-                                    break
-                                # Stop looking if we hit another heading or end of properties
-                                if re.match(r'^(\*+|\s*$)', lines[i]) and i != line_num:
-                                    break
-                        
-                        if has_id and org_id:
-                            found_ids += 1
-                            _, created = ensure_handle_for_uuid(org_id, cache, wordlist)
-                            updated = updated or created
-                        elif len(missing_examples) < 5:  # Collect examples
-                            rel_path = os.path.relpath(file_path, os.path.expanduser("~"))
-                            missing_examples.append((heading_text, rel_path, line_num))
-                            
-            except Exception as e:
-                print(f"Warning: Could not read {file_path}: {e}")
-        
-        print(f"Found {found_ids} IDs out of {total_headings} headings")
-        
-        if found_ids < total_headings:
-            missing = total_headings - found_ids  
-            print(f"⚠️  {missing} headings are missing IDs")
-            
-            if missing_examples:
-                print("\nExamples of headings without IDs:")
-                for heading, rel_path, line_num in missing_examples:
-                    print(f"  • {heading} ({rel_path}:{line_num})")
-                if missing > 5:
-                    print(f"  ... and {missing - 5} more")
-    
-    if updated:
-        save_handle_cache(cache)
-    
-    total_cached = len(cache.get('by_uuid', {}))
-    print(f"\n✓ Handles cached: {total_cached}")
-    
-    if total_cached == 0:
-        print("No Org IDs found. Make sure you have headings with IDs in your org files.")
-    
-    return
-
-
 def parse_org_timestamp(value: Optional[str]) -> Tuple[Optional[date], Optional[str]]:
     if not value:
         return None, None
@@ -1158,17 +1001,23 @@ def cmd_start(args):
         is_org_id = True
 
     if is_org_id:
-        elisp = f'''(progn
-          (require 'org)
-          (require 'org-id)
-          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
-            (if (not m)
-                (princ "NOT_FOUND")
-              (with-current-buffer (marker-buffer m)
-                (goto-char m)
+        elisp = f'''
+(progn
+  (require 'org)
+  (require 'org-id)
+  (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
+    (if (not m)
+        "NOT_FOUND"
+      (with-current-buffer (marker-buffer m)
+        (save-excursion
+          (goto-char m)
+          (condition-case err
+              (progn
                 (org-clock-in)
                 (save-buffer)
-                (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
+                (substring-no-properties (org-get-heading t t t t)))
+            (error (format "ERROR: %s" (error-message-string err)))))))))
+        '''
 
         try:
             heading = emacs_eval(elisp).strip()
@@ -1212,6 +1061,30 @@ def cmd_start(args):
     print("Tip: use handles for stable task references across operations.", file=sys.stderr)
     return 0
 
+def cmd_stop(args):
+    """Clock out the active task."""
+    elisp = '''
+(progn
+  (condition-case err
+      (if (org-clocking-p)
+          (progn (+org/toggle-last-clock nil) "SUCCESS")
+        "NO_ACTIVE_CLOCK")
+    (error (format "ERROR: %s" (error-message-string err)))))
+    '''
+    try:
+        result = emacs_eval(elisp)
+    except RuntimeError as e:
+        print(f"Error clocking out: {e}", file=sys.stderr)
+        return 1
+    if result == "NO_ACTIVE_CLOCK":
+        print("No active clock to stop.")
+        return 0
+    elif result == "SUCCESS":
+        print("✓ Clocked out of active task.")
+        return 0
+    else:
+        print(f"Unexpected clock out result: {result}")
+        return 0
 
 def _load_context():
     """Load active context filter from ~/.org-warrior/context."""
@@ -1289,14 +1162,16 @@ def emacs_eval(elisp: str) -> str:
         out = out[1:-1]
     return _unescape_elisp_string(out)
 
+def emacs_eval_file(filepath: str) -> str:
+    """Evaluate an ELisp file in the running Emacs daemon and return stdout (stripped)."""
+    pass
 
 def _get_task_body(org_id: str) -> Optional[str]:
-    elisp = rf"""(progn
-  (require 'org)
-  (require 'org-id)
+    elisp = rf"""
+(progn
   (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
     (if (not m)
-        (princ "NOT_FOUND")
+        "NOT_FOUND"
       (with-current-buffer (marker-buffer m)
         (goto-char m)
         (org-back-to-heading t)
@@ -1305,8 +1180,8 @@ def _get_task_body(org_id: str) -> Optional[str]:
         (let* ((cb (point))
                (ce (save-excursion (org-end-of-subtree t t) (point))))
           (if (and cb ce (< cb ce))
-              (princ (string-trim-right (buffer-substring-no-properties cb ce)))
-            (princ "")))))))"""
+              (string-trim-right (buffer-substring-no-properties cb ce))))))))
+ """
     out = emacs_eval(elisp)
     if out == 'NOT_FOUND':
         return None
@@ -1382,12 +1257,16 @@ def cmd_add(args):
         print("Usage: org-warrior add <title>", file=sys.stderr)
         return 1
     title = _escape_elisp(' '.join(args))
-    elisp = rf"""(progn
-      (require 'org)
-      (require 'org-id)
-      (let* ((file (expand-file-name "~/org/inbox.org"))
-             (heading "Inbox"))
-        (find-file file)
+    elisp = rf"""
+(progn
+  (require 'org)
+  (require 'org-id)
+  (let* ((file (expand-file-name "~/org/inbox.org"))
+         (heading "Inbox"))
+    ;; Use find-file-noselect instead of find-file
+    (with-current-buffer (find-file-noselect file)
+      ;; save-excursion ensures point position is restored
+      (save-excursion
         (goto-char (point-min))
         (unless (re-search-forward (format "^\\*+ %s\\b" (regexp-quote heading)) nil t)
           (goto-char (point-max))
@@ -1399,7 +1278,8 @@ def cmd_add(args):
           (goto-char pos)
           (org-id-get-create)
           (save-buffer)
-          (princ (org-id-get)))))"""
+          (org-id-get))))))
+    """
     new_id = emacs_eval(elisp).strip()
     cache = load_handle_cache()
     wordlist = load_wordlist()
@@ -1420,17 +1300,23 @@ def cmd_set_state(args):
     if not org_id:
         return 1
     state = args[1]
-    elisp = rf"""(progn
-      (require 'org)
-      (require 'org-id)
-      (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
-        (if (not m)
-            (princ "NOT_FOUND")
-          (with-current-buffer (marker-buffer m)
-            (goto-char m)
-            (org-todo "{_escape_elisp(state)}")
-            (save-buffer)
-            (princ "OK")))))"""
+    elisp = rf"""
+(progn
+  (require 'org)
+  (require 'org-id)
+  (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
+    (if (not m)
+        "NOT_FOUND"
+      (with-current-buffer (marker-buffer m)
+        (save-excursion
+          (goto-char m)
+          (condition-case err
+              (progn
+                (org-todo "{_escape_elisp(state)}")
+                (save-buffer)
+                (substring-no-properties (org-get-heading t t t t)))
+            (error (format "ERROR: %s" (error-message-string err)))))))))
+    """
     out = emacs_eval(elisp).strip()
     if out == 'NOT_FOUND':
         print(f"No entry found for ID {org_id}", file=sys.stderr)
@@ -1463,18 +1349,24 @@ def cmd_schedule(args):
         is_org_id = True
 
     if is_org_id:
-        elisp = f'''(progn
-          (require 'org)
-          (require 'org-id)
-          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
-            (if (not m)
-                (princ "NOT_FOUND")
-              (with-current-buffer (marker-buffer m)
-                (goto-char m)
-                (let ((d (format-time-string "%Y-%m-%d %H:%M" (org-read-date nil t "{_escape_elisp(date)}"))))
+        elisp = f'''
+(progn
+  (require 'org)
+  (require 'org-id)
+  (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
+    (if (not m)
+        "NOT_FOUND"
+      (with-current-buffer (marker-buffer m)
+        (save-excursion
+          (goto-char m)
+          (condition-case err
+              (progn
+                (let ((d (format-time-string "%Y-%m-%d %H:%m" (org-read-date nil t "{_escape_elisp(date)}"))))
                   (org-schedule nil d))
                 (save-buffer)
-                (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
+                (substring-no-properties (org-get-heading t t t t)))
+            (error (format "ERROR: %s" (error-message-string err)))))))))
+        '''
 
         try:
             heading = emacs_eval(elisp).strip()
@@ -1545,18 +1437,24 @@ def cmd_deadline(args):
         is_org_id = True
 
     if is_org_id:
-        elisp = f'''(progn
-          (require 'org)
-          (require 'org-id)
-          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
-            (if (not m)
-                (princ "NOT_FOUND")
-              (with-current-buffer (marker-buffer m)
-                (goto-char m)
-                (let ((d (org-read-date nil nil "{_escape_elisp(date)}")))
+        elisp = f'''
+(progn
+  (require 'org)
+  (require 'org-id)
+  (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
+    (if (not m)
+        "NOT_FOUND"
+      (with-current-buffer (marker-buffer m)
+        (save-excursion
+          (goto-char m)
+          (condition-case err
+              (progn
+                (let ((d (format-time-string "%Y-%m-%d %H:%m" (org-read-date nil t "{_escape_elisp(date)}"))))
                   (org-deadline nil d))
                 (save-buffer)
-                (princ (format "%s" (substring-no-properties (org-get-heading t t t t))))))))'''
+                (substring-no-properties (org-get-heading t t t t)))
+            (error (format "ERROR: %s" (error-message-string err)))))))))
+        '''
 
         try:
             heading = emacs_eval(elisp).strip()
@@ -1626,87 +1524,11 @@ def cmd_context(args):
     return 0
 
 
-def cmd_modify(args):
-    """Apply an action to all tasks matching filters.
-
-    Usage: org-warrior modify <filters...> set-state <STATE>
-    """
-    if len(args) < 2:
-        print("Usage: org-warrior modify <filters...> set-state <STATE>", file=sys.stderr)
-        return 1
-    # Find the action keyword
-    action_idx = None
-    for i, a in enumerate(args):
-        if a == "set-state" and i + 1 < len(args):
-            action_idx = i
-            break
-    if action_idx is None:
-        print("Error: only 'set-state <STATE>' is currently supported.", file=sys.stderr)
-        return 1
-
-    filter_args = args[:action_idx]
-    state = args[action_idx + 1]
-    query = build_query(filter_args) if filter_args else '(and (todo) (not (done)))'
-    results = run_org_ql(query, select="full")
-    if not results or (len(results) == 1 and not results[0]):
-        print("No matching tasks.", file=sys.stderr)
-        return 1
-
-    cache, tasks, updated = ensure_handles_for_results(results)
-    if updated:
-        save_handle_cache(cache)
-    print(f"Will set state to {state} for {len(tasks)} task(s):")
-    for i, t in enumerate(tasks, 1):
-        print(f"  {i}. {t.get('heading', '')}")
-    answer = input("Proceed? [y/N] ").strip().lower()
-    if answer != "y":
-        print("Aborted.")
-        return 0
-
-    ok = 0
-    for t in tasks:
-        org_id = t.get("id")
-        if not org_id:
-            print(f"  Skipping (no ID): {t.get('heading', '')}", file=sys.stderr)
-            continue
-        elisp = rf"""(progn
-          (require 'org) (require 'org-id)
-          (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
-            (if (not m) (princ "NOT_FOUND")
-              (with-current-buffer (marker-buffer m)
-                (goto-char m)
-                (org-todo "{_escape_elisp(state)}")
-                (save-buffer)
-                (princ "OK")))))"""
-        try:
-            out = emacs_eval(elisp).strip()
-            if out == "OK":
-                ok += 1
-            else:
-                print(f"  Not found: {t.get('heading', '')}", file=sys.stderr)
-        except RuntimeError as e:
-            print(f"  Error: {e}", file=sys.stderr)
-    git_commit_org(f"org-warrior: modify set-state {state} ({ok} tasks)")
-    print(f"✓ Updated {ok} of {len(tasks)} task(s).")
-    return 0
-
-
 def cmd_jira_sync(args):
     """Trigger org-jira sync inside Emacs. NOTE: hits external Jira service."""
-    elisp = """(progn (require 'org-jira) (org-jira-get-issues) (princ "OK"))"""
+    elisp = """(progn (require 'org-jira) (org-jira-get-issues) "OK")"""
     out = emacs_eval(elisp).strip()
     print("✓ Jira sync triggered" if out == 'OK' else out)
-    return 0
-
-
-def cmd_handles_assign(args):
-    """Scan org files for existing IDs and populate handle cache."""
-    if args:
-        print("Usage: org-warrior handles-assign", file=sys.stderr)
-        print("  Scans org files for existing IDs and caches handles.", file=sys.stderr)
-        print("  Warns about headings without IDs (use Emacs hooks to create them).", file=sys.stderr)
-        return 1
-    scan_and_cache_handles()
     return 0
 
 
@@ -1740,16 +1562,15 @@ COMMANDS:
     open index <N> [filters]    Open Nth task from filter in Emacs
 
   Write:
-    add <title>                 Add new TODO to ~/org/inbox.org
-    set-state <handle|org-id> <STATE>  Set TODO state
+    add <title>                           Add new TODO to ~/org/inbox.org
+    set-state <handle|org-id> <STATE>     Set TODO state
     schedule <date> [filter] <id|handle>  Schedule a task
     deadline <date> [filter] <id|handle>  Set deadline
-    start [filter] <id>         Clock in to a task by numeric index
-    modify <filters> set-state <STATE>  Bulk set state for matching tasks
+    start <handle>                   Clock in to a task by numeric index
+    stop                                  Clock out the active task
 
   Meta:
     context [<filter>|none]     Get/set persistent context filter
-    handles-assign              Scan org files and cache handles
     jira-sync                   Trigger org-jira sync
 
 CONCEPTS:
@@ -1827,7 +1648,7 @@ SETUP (Required for handles):
 
         (add-hook 'before-save-hook 'org-warrior/ensure-ids-on-save)
 
-    Then save your org files to generate IDs, and run: org-warrior handles-assign
+    Then edit+save your org files to generate IDs.
 """
     print(help_text.strip())
 
@@ -1879,12 +1700,12 @@ def main():
         'count': cmd_count,
         'open': cmd_open,
         'start': cmd_start,
+        'stop': cmd_stop,
         'schedule': cmd_schedule,
         'deadline': cmd_deadline,
         'jira-sync': cmd_jira_sync,
-        'handles-assign': cmd_handles_assign,
         'context': cmd_context,
-        'modify': cmd_modify,
+        'set-state': cmd_set_state,
         'add': cmd_add,
     }
     
