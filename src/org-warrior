@@ -35,7 +35,7 @@ def git_commit_org(message: str):
 
 # Configuration: config file < env vars < CLI flags
 CONFIG_DIR = os.path.expanduser("~/.org-warrior")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.toml")
 CONTEXT_FILE = os.path.join(CONFIG_DIR, "context")
 
 
