@@ -187,40 +187,15 @@ class OrgQL:
     def get_task_by_id(org_id: str) -> Optional["Task"]:
         """Get a single task by its Org ID."""
         from org_warrior import config
-        from org_warrior.EmacsHandler import EmacsHandler
-
-        # Use property query for fast lookup
-        query = f'(property "ID" "{_escape_elisp(org_id)}")'
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
 
         files = resolve_org_files(config.ORG_FILES)
         files_quoted = " ".join(f'"{f}"' for f in files)
 
-        select_expr = """(list (substring-no-properties (org-get-heading t t t t))
-                              (org-entry-get nil "TODO")
-                              (org-entry-get nil "PRIORITY")
-                              (org-entry-get nil "DEADLINE")
-                              (org-entry-get nil "SCHEDULED")
-                              (buffer-file-name)
-                              (line-number-at-pos)
-                              (org-entry-get nil "ID")
-                              (org-get-tags))"""
-
-        elisp = f"""(progn
-  (require 'org-ql)
-  (let ((results (org-ql-select '({files_quoted})
-                   '{query}
-                   :action '{select_expr})))
-    (if results
-        (let ((r (car results)))
-          (if (listp r)
-              (format "%S" r)
-            (format "%s" r)))
-      "")))
-"""
-
-        handler = EmacsHandler(daemon=config.EMACS_SERVER)
         try:
-            result = handler.client.eval(elisp)
+            result = emacs_run_elisp_file(
+                "get-task-by-id.el", params={"files": files_quoted, "org_id": org_id}
+            )
             if not result or result.strip() == '""':
                 return None
 
@@ -244,27 +219,14 @@ class OrgQL:
     @staticmethod
     def get_task_body(org_id: str) -> Optional[str]:
         """Get the body content of a task by its Org ID."""
-        from org_warrior import config
-        from org_warrior.EmacsHandler import EmacsHandler
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
 
-        elisp = f"""(progn
-  (let ((m (org-id-find "{_escape_elisp(org_id)}" t)))
-    (if (not m)
-        "NOT_FOUND"
-      (with-current-buffer (marker-buffer m)
-        (goto-char m)
-        (org-back-to-heading t)
-        (end-of-line)
-        (forward-char 1)
-        (let* ((cb (point))
-               (ce (save-excursion (org-end-of-subtree t t) (point))))
-          (if (and cb ce (< cb ce))
-              (string-trim-right (buffer-substring-no-properties cb ce))))))))
-"""
-
-        handler = EmacsHandler(daemon=config.EMACS_SERVER)
         try:
-            result = handler.client.eval(elisp)
+            result = emacs_run_elisp_file("get-task-body.el", params={"org_id": org_id})
+
+            if not result:
+                return None
+
             # Remove outer quotes if present
             if result.startswith('"') and result.endswith('"'):
                 result = result[1:-1]
@@ -289,8 +251,8 @@ class OrgQL:
     ) -> list["Task"]:
         """Run org-ql query and return list of Task objects."""
         from org_warrior import config
-        from org_warrior.EmacsHandler import EmacsHandler
         from org_warrior.HandleCache import HandleCache
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
 
         files = files or config.ORG_FILES
         file_list = resolve_org_files(files)
@@ -299,34 +261,12 @@ class OrgQL:
         logging.debug(f"Running org-ql query: {query_str}")
         logging.debug(f"On files: {files_quoted}")
 
-        # Build the select expression to get full task data
-        select_expr = """(list (substring-no-properties (org-get-heading t t t t))
-                              (org-entry-get nil "TODO")
-                              (org-entry-get nil "PRIORITY")
-                              (org-entry-get nil "DEADLINE")
-                              (org-entry-get nil "SCHEDULED")
-                              (buffer-file-name)
-                              (line-number-at-pos)
-                              (org-entry-get nil "ID")
-                              (org-get-tags))"""
-
-        elisp = f"""(progn
-  (require 'org-ql)
-  (let ((results (org-ql-select '({files_quoted})
-                   '{query_str}
-                   :action '{select_expr})))
-    (mapconcat (lambda (r)
-                 (if (listp r)
-                     (format "%S" r)
-                   (format "%s" r)))
-               results
-               "\\n")))
-"""
-
-        handler = EmacsHandler(daemon=config.EMACS_SERVER)
-        # Use emacs eval directly instead of loading a file
+        # Execute org-ql query using elisp template
         try:
-            result = handler.client.eval(elisp)
+            result = emacs_run_elisp_file(
+                "org-ql-select.el", params={"files": files_quoted, "query": query_str}
+            )
+
             if not result:
                 return []
 
@@ -380,38 +320,17 @@ class OrgQL:
         Returns:
             The Org ID of the created task, or None on error
         """
-        from org_warrior import config
-        from org_warrior.EmacsHandler import EmacsHandler
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
 
-        # Escape the title for elisp
-        escaped_title = _escape_elisp(title)
-        escaped_file = inbox_file  # File path doesn't need escaping
-        escaped_heading = _escape_elisp(inbox_heading)
-
-        elisp = f"""(progn
-  (require 'org)
-  (require 'org-id)
-  (let* ((file (expand-file-name "{escaped_file}"))
-         (heading "{escaped_heading}"))
-    (with-current-buffer (find-file-noselect file)
-      (save-excursion
-        (goto-char (point-min))
-        (unless (re-search-forward (format "^\\\\*+ %s\\\\b" (regexp-quote heading)) nil t)
-          (goto-char (point-max))
-          (insert (format "* %s\\n" heading)))
-        (org-end-of-subtree t t)
-        (unless (bolp) (insert "\\n"))
-        (let ((pos (point)))
-          (insert (format "** TODO %s\\n" "{escaped_title}"))
-          (goto-char pos)
-          (org-id-get-create)
-          (save-buffer)
-          (org-id-get))))))
-"""
-
-        handler = EmacsHandler(daemon=config.EMACS_SERVER)
         try:
-            result = handler.client.eval(elisp)
+            result = emacs_run_elisp_file(
+                "add-task.el",
+                params={
+                    "title": title,
+                    "inbox_file": inbox_file,
+                    "inbox_heading": inbox_heading,
+                },
+            )
             if result:
                 return result.strip()
             return None
