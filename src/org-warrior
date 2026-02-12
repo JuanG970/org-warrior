@@ -5,6 +5,7 @@ Executes org-ql queries via Emacs in batch mode.
 """
 
 import configparser
+import logging
 import subprocess
 import sys
 import os
@@ -16,7 +17,6 @@ import tempfile
 import uuid as _uuid
 from datetime import datetime, date
 from typing import Optional, Tuple
-
 
 def git_commit_org(message: str):
     """Auto-commit changes in ~/org if it's a git repo and there are modifications."""
@@ -66,6 +66,14 @@ DEFAULT_LIMIT = _cfgval("display", "default_limit", "")
 CONFIG_COLOR = _cfgval("display", "color", "auto")
 CONFIG_SHOW_HANDLES = _cfgval("display", "show_handles", "true").lower() != "false"
 CONFIG_SHOW_IDS = _cfgval("display", "show_ids", "false").lower() == "true"
+
+DEBUG = _cfgval("core", "verbose") == "true"
+
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format='\033[90m%(levelname)s: %(message)s\033[0m',
+    stream=sys.stderr
+)
 
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -301,53 +309,6 @@ def format_date_value(kind: str, value: Optional[str]) -> Optional[str]:
     return colorize(value, color, bold=bold)
 
 
-def get_doom_load_paths():
-    """Get load paths for Doom Emacs straight packages."""
-    home = os.path.expanduser("~")
-    straight_dir = os.path.join(home, ".emacs.d", ".local", "straight")
-    
-    if not os.path.isdir(straight_dir):
-        return []
-    
-    # Find build directory (e.g., build-30.2), exclude cache files
-    build_dirs = [d for d in os.listdir(straight_dir) 
-                  if d.startswith("build") and os.path.isdir(os.path.join(straight_dir, d))]
-    if not build_dirs:
-        return []
-    
-    build_dir = os.path.join(straight_dir, sorted(build_dirs)[-1])
-    
-    # Required packages for org-ql
-    required = ["org-ql", "org", "dash", "s", "ts", "peg", "ov", 
-                "org-super-agenda", "compat", "f", "ht", "map"]
-    
-    paths = []
-    for pkg in required:
-        pkg_path = os.path.join(build_dir, pkg)
-        if os.path.isdir(pkg_path):
-            paths.append(pkg_path)
-    
-    return paths
-
-
-def build_load_path_elisp():
-    """Build elisp to add load paths."""
-    paths = []
-    
-    # Custom load path from environment
-    if EMACS_LOAD_PATH:
-        paths.extend(EMACS_LOAD_PATH.split(":"))
-    
-    # Auto-detect Doom Emacs
-    paths.extend(get_doom_load_paths())
-    
-    if not paths:
-        return ""
-    
-    elisp_parts = [f'(add-to-list \'load-path "{p}")' for p in paths]
-    return " ".join(elisp_parts)
-
-
 def _escape_elisp(s):
     """Escape a string for safe embedding inside elisp double-quoted strings."""
     return s.replace('\\', '\\\\').replace('"', '\\"')
@@ -409,38 +370,12 @@ def resolve_org_files(files_spec):
     return unique
 
 
-def build_agenda_files_eval(files_spec):
-    """Build elisp to set org-agenda-files from resolved paths."""
-    files = resolve_org_files(files_spec)
-    if not files:
-        return None
-    escaped_files = [f.replace('"', '\\"') for f in files]
-    file_list = " ".join(f'"{f}"' for f in escaped_files)
-    return f"(setq org-agenda-files '({file_list}))"
-
-
-def emacs_eval_with_agenda(elisp: str, timeout: int = 15) -> str:
-    """Evaluate ELisp with org-agenda-files set."""
-    load_paths = build_load_path_elisp()
-    agenda_files_eval = build_agenda_files_eval(ORG_FILES)
-    if not agenda_files_eval:
-        raise RuntimeError("no org files found")
-    cmd = [EMACS_CMD, "-s", EMACS_SERVER, "-e", f"(progn {load_paths} {agenda_files_eval} {elisp})"]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError('emacsclient timed out (Emacs may be busy or waiting for input)')
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or '').strip() or 'emacsclient eval failed')
-    out = (r.stdout or '').strip()
-    if out.startswith('"') and out.endswith('"'):
-        out = out[1:-1]
-    return _unescape_elisp_string(out)
-
-
 def run_org_ql(query, files=None, select="heading"):
     """Run an org-ql query via Emacs batch mode and return results."""
     files = files or ORG_FILES
+    files = resolve_org_files(files)
+    files_quoted = ' '.join(f'"{f}"' for f in files)
+    logging.debug(f"Running org-ql query on files: {files_quoted}")
     
     if select == "heading":
         select_expr = "(substring-no-properties (org-get-heading t t t t))"
@@ -456,17 +391,10 @@ def run_org_ql(query, files=None, select="heading"):
     else:
         select_expr = select
 
-    load_paths = build_load_path_elisp()
-    agenda_files_eval = build_agenda_files_eval(files)
-    if not agenda_files_eval:
-        print("Error: no org files found.", file=sys.stderr)
-        return []
-
     elisp = f"""
 (progn
-  {load_paths}
   (require 'org-ql)
-  (let ((results (org-ql-select (org-agenda-files)
+  (let ((results (org-ql-select '({files_quoted})
                    '{query}
                    :action '{select_expr})))
     (mapconcat (lambda (r)
@@ -476,32 +404,12 @@ def run_org_ql(query, files=None, select="heading"):
                results
                "\\n")))
 """
-    
-    cmd = [
-        EMACS_CMD, "-s", EMACS_SERVER, "-e", 
-        f"(progn {agenda_files_eval} {elisp})"
-    ]
-    
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=EMACS_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        print("Error: emacsclient timed out (Emacs may be busy or waiting for input).", file=sys.stderr)
+        result = emacs_eval(elisp)
+    except Exception as e:
+        logging.debug(f"Error running org-ql query: {e}")
         return []
-    if result.returncode != 0 and result.stderr:
-        errors = [l for l in result.stderr.split('\n')
-                  if l and not l.startswith('Loading') and 'Warning' not in l]
-        if errors:
-            print(f"Error: {' '.join(errors)}", file=sys.stderr)
-    
-    # emacsclient returns the result wrapped in quotes; unescape the
-    # elisp printed string properly so inner s-expression escaping is
-    # preserved for the tokenizer.
-    output = result.stdout.strip()
-    if output.startswith('"') and output.endswith('"'):
-        output = output[1:-1]
-    output = _unescape_elisp_string(output)
-    return output.split('\n') if output else []
-
+    return result.splitlines()
 
 def _tokenize_sexp(s):
     """Tokenize a flat s-expression into a list of Python values.
@@ -716,28 +624,6 @@ def _get_task_by_index(results, idx):
         print("Error: could not determine task location.", file=sys.stderr)
         return None
     return task
-
-
-def cmd_task(args):
-    """Show details for a single task by index from the given query (default list)."""
-    if not args:
-        print("Usage: org-warrior task <id> [filters]", file=sys.stderr)
-        return 1
-    try:
-        idx = int(args[0])
-    except ValueError:
-        print("Error: task id must be a number.", file=sys.stderr)
-        return 1
-    query = build_query(args[1:])
-    results = run_org_ql(query, select="full")
-    if idx < 1 or idx > len(results):
-        print(f"Task id {idx} out of range (1-{len(results)}).", file=sys.stderr)
-        return 1
-    cache, tasks, updated = ensure_handles_for_results([results[idx - 1]])
-    if updated:
-        save_handle_cache(cache)
-    print(format_task_detail(tasks[0], idx))
-    return 0
 
 
 def _parse_display_flags(args):
@@ -1557,16 +1443,15 @@ COMMANDS:
     query <expr>                Run raw org-ql expression
     count [today|week|overdue|filters]  Print number of matching tasks
     show <handle|org-id>        Show task details
-    task <id> [filters]         Show task details by numeric index
-    open <handle|org-id>        Open task in Emacs
-    open index <N> [filters]    Open Nth task from filter in Emacs
+    task <handle|org-id>        Same as show
+    open <handle|org-id>        Open task in Emacs GUI
 
   Write:
     add <title>                           Add new TODO to ~/org/inbox.org
     set-state <handle|org-id> <STATE>     Set TODO state
-    schedule <date> [filter] <id|handle>  Schedule a task
-    deadline <date> [filter] <id|handle>  Set deadline
-    start <handle>                   Clock in to a task by numeric index
+    schedule <date> <id|handle>           Schedule a task
+    deadline <date> <id|handle>           Set deadline
+    start <handle>                        Clock in to a task
     stop                                  Clock out the active task
 
   Meta:
@@ -1577,10 +1462,9 @@ CONCEPTS:
     handle      Deterministic 3-word name derived from Org ID (e.g., paper-salmon-quiet).
                 Case insensitive, supports unique prefix matching.
     org-id      UUID stored as :ID: property on Org headings. Stable across operations.
-    index       Numeric position in a filtered list (1-based). Unstable across operations.
+    index       Numeric position in a filtered list (1-based). Unstable across operations. Just a reference.
 
-    Prefer handles or org-ids for write operations. Numeric indices may shift
-    after any modification.
+    Prefer handles or org-ids for write operations. Numeric indices may shift after any modification.
 
 OPTIONS:
     -f, --file <path>    Restrict queries to a single org file
@@ -1602,10 +1486,9 @@ FILTERS:
     <text>            Text search (regexp)
 
 CONFIG:
-    ~/.org-warrior/config   INI config file (optional)
+    ~/.org-warrior/config.toml   TOML config file
 
     [core]
-    files = ~/org           # Same as ORG_WARRIOR_FILES
     server = edit           # Same as ORG_WARRIOR_SERVER
     emacs_cmd = emacsclient # Same as EMACS_CMD
 
@@ -1619,7 +1502,7 @@ CONFIG:
     Env vars override config; CLI flags override both.
 
 ENVIRONMENT:
-    ORG_WARRIOR_FILES   Path(s) to org files/directories (default: ~/org)
+    ORG_WARRIOR_FILES   Path(s) to org files/directories (default: All files inside ~/org)
     EMACS_CMD           Emacs client command (default: emacsclient)
     ORG_WARRIOR_SERVER  Emacs server name (default: edit)
 
@@ -1632,7 +1515,7 @@ EXAMPLES:
     org-warrior context +work                     # Set persistent filter
     org-warrior list                              # Now filtered to +work
     org-warrior context none                      # Clear filter
-    org-warrior modify +old set-state DONE        # Bulk complete tasks
+    org-warrior set-state paper-salmon-quiet DONE # Set state
     org-warrior -f ~/org/inbox.org list           # Single file
     org-warrior schedule "tomorrow" paper-salmon  # Schedule by handle prefix
     org-warrior deadline "friday" +work 2         # Deadline by index
@@ -1684,7 +1567,7 @@ def main():
     commands = {
         'list': cmd_list,
         'show': cmd_show,
-        'task': cmd_task,
+        'task': cmd_show,
         'next': cmd_next,
         'today': cmd_today,
         'week': cmd_week,
