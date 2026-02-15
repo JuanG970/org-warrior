@@ -24,10 +24,17 @@
                         (looking-at-p "^[ \t]*:PROPERTIES:"))
                   (re-search-forward "^[ \t]*:END:" nil t)
                   (end-of-line))
-                ;; Now we're after parent properties. Move to next line.
+                ;; Now we're after parent properties
+                ;; Find the end of all existing children at this level or deeper
                 (forward-line 1)
                 (beginning-of-line)
-                ;; Insert new child heading at this position
+                ;; Skip forward past all child headings
+                (while (and (not (eobp))
+                            (looking-at-p "^\\*+")
+                            (> (org-current-level) parent-level))
+                  (org-end-of-subtree t t))
+                ;; Now we're at the end of all children - insert here
+                (beginning-of-line)
                 (insert (format "%s TODO %s\n" child-stars "{title}"))
                 ;; Move back to the start of the line we just inserted
                 (forward-line -1)
@@ -35,5 +42,5 @@
                 ;; Create org-id for the new heading
                 (let ((new-id (org-id-get-create)))
                   (save-buffer)
-                  new-id)))
+                  new-id))
             (error (format "ERROR: %s" (error-message-string err)))))))))

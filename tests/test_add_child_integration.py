@@ -7,7 +7,7 @@ import os
 
 
 class TestAddChildOrdering:
-    """Test that children are added in reverse-chronological order (newest first)."""
+    """Test that children are added in chronological order (oldest first, newest at bottom)."""
 
     def test_elisp_logic_with_mock_org_file(self):
         """
@@ -57,8 +57,8 @@ class TestAddChildOrdering:
 
     def test_child_insertion_point_logic(self):
         """
-        Test that the insertion point is after parent properties.
-        This ensures children appear at the top, not at the end.
+        Test that the insertion point is after all existing children.
+        This ensures children appear in chronological order (oldest first).
         """
         from org_warrior.elisp_helpers import load_elisp_template
 
@@ -69,26 +69,25 @@ class TestAddChildOrdering:
         assert ":END:" in elisp_code
         assert "re-search-forward" in elisp_code
 
-        # Verify we insert after moving past the properties
-        assert "(forward-line 1)" in elisp_code
+        # Verify we skip past existing children
+        assert "org-end-of-subtree" in elisp_code or "while" in elisp_code
 
         # The logic should be:
         # 1. Move to end of parent heading line
         # 2. If properties exist, skip to :END:
-        # 3. Move to next line (forward-line 1)
-        # 4. Insert there (this puts children at top, after properties)
+        # 3. Skip past all existing children (org-end-of-subtree in a loop)
+        # 4. Insert at the end (this puts new children at bottom, chronological order)
 
         lines = [line.strip() for line in elisp_code.split("\n")]
 
-        # Find the comment that says we're after properties
-        after_properties_comment = None
-        for i, line in enumerate(lines):
-            if "after parent properties" in line.lower():
-                after_properties_comment = i
-                break
+        # Find comments about skipping children or end of children
+        has_skip_logic = any(
+            "child" in line.lower() and ("skip" in line.lower() or "end" in line.lower())
+            for line in lines
+        )
 
-        assert after_properties_comment is not None, (
-            "Should have comment indicating position after properties"
+        assert has_skip_logic or "org-end-of-subtree" in elisp_code, (
+            "Should have logic to skip past existing children"
         )
 
     def test_mock_file_structure(self):
@@ -108,17 +107,17 @@ class TestAddChildOrdering:
         #   :PROPERTIES:
         #   :ID: parent-id
         #   :END:
-        #   ** TODO Child C     <- Most recent at top
+        #   ** TODO Child A     <- Oldest at top (added first)
         #   :PROPERTIES:
-        #   :ID: child-c-id
+        #   :ID: child-a-id
         #   :END:
         #   ** TODO Child B
         #   :PROPERTIES:
         #   :ID: child-b-id
         #   :END:
-        #   ** TODO Child A     <- Oldest at bottom
+        #   ** TODO Child C     <- Most recent at bottom (added last)
         #   :PROPERTIES:
-        #   :ID: child-a-id
+        #   :ID: child-c-id
         #   :END:
 
         # This test documents expected behavior
@@ -129,21 +128,21 @@ After insertion of children in order A, B, C, the structure should be:
 
 Parent
 ├── Properties (ID: parent-id)
-├── Child C (most recent) <- inserted here (top)
+├── Child A (oldest, added first)
 ├── Child B
-└── Child A (oldest)
+└── Child C (most recent, added last) <- inserted here (bottom)
 
 NOT:
 
 Parent
 ├── Properties
-├── Child A (oldest)
+├── Child C (most recent) <- inserted here (top, WRONG)
 ├── Child B
-└── Child C (most recent) <- inserted here (bottom, WRONG)
+└── Child A (oldest)
 """
         # This test passes if the above documentation is clear
-        assert "most recent" in expected_structure
-        assert "top" in expected_structure
+        assert "oldest, added first" in expected_structure
+        assert "bottom" in expected_structure
 
 
 class TestAddChildEdgeCases:
