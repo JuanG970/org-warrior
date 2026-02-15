@@ -9,10 +9,14 @@ from rich.syntax import Syntax
 
 from org_warrior import config
 from org_warrior.Org import OrgQL
-from org_warrior.TaskFormatter import TaskFormatter
+from org_warrior.TaskFormatter import TaskFormatter, OUTPUT_FORMATS
 
 
 app = typer.Typer()
+modify_app = typer.Typer(help="Modify task tags or properties.")
+tag_app = typer.Typer(help="Add or remove tags on a task.")
+modify_app.add_typer(tag_app, name="tag")
+app.add_typer(modify_app, name="modify")
 console = Console()
 err_console = Console(stderr=True)
 formatter = TaskFormatter(console)
@@ -30,7 +34,10 @@ def callback():
 def list(
     query: str = typer.Argument(
         "",
-        help="Filter tasks using TaskWarrior's filter. Defaults to org-ql: (and (todo) (not (done))).",
+        help="Filter: +tag, state:TODO, pri:A, due:today, scheduled:today, project:any, or text search.",
+    ),
+    raw: Optional[str] = typer.Option(
+        None, "--raw", help="Raw org-ql s-expression (bypasses filter parsing)"
     ),
     show_ids: bool = typer.Option(False, "--ids", "--show-ids", help="Show Org IDs"),
     no_handles: bool = typer.Option(False, "--no-handles", help="Hide handles"),
@@ -41,12 +48,23 @@ def list(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """List all tasks matching the given filter."""
     try:
-        # Build org-ql query
-        org_ql_filter = OrgQL.build_query(query)
-        logging.debug(f"Built org-ql filter: {org_ql_filter}")
+        if raw:
+            org_ql_filter = raw
+        else:
+            org_ql_filter = OrgQL.build_query(query)
+        logging.debug(f"org-ql filter: {org_ql_filter}")
+
+        if output_format not in OUTPUT_FORMATS:
+            err_console.print(
+                f"[red]Error: unknown format '{output_format}'. Choose from: {', '.join(OUTPUT_FORMATS)}[/red]"
+            )
+            return 1
 
         # Run query
         tasks = OrgQL.run_query(org_ql_filter)
@@ -70,6 +88,7 @@ def list(
             limit=actual_limit,
             sort_key=actual_sort,
             show_file=show_file,
+            output_format=output_format,
         )
         return 0
     except Exception as e:
@@ -162,9 +181,16 @@ def _run_query_command(
     limit: Optional[int] = None,
     sort: Optional[str] = None,
     show_file: bool = False,
+    output_format: str = "table",
 ) -> int:
     """Helper to run an org-ql query and display results (DRY)."""
     try:
+        if output_format not in OUTPUT_FORMATS:
+            err_console.print(
+                f"[red]Error: unknown format '{output_format}'. Choose from: {', '.join(OUTPUT_FORMATS)}[/red]"
+            )
+            return 1
+
         tasks = OrgQL.run_query(query)
 
         # Use config defaults if not provided
@@ -177,7 +203,12 @@ def _run_query_command(
         actual_sort = sort or config.DEFAULT_SORT or None
 
         if not tasks:
-            console.print(f"[dim]{empty_message}[/dim]")
+            if output_format == "json":
+                console.print("[]")
+            elif output_format == "csv":
+                pass
+            else:
+                console.print(f"[dim]{empty_message}[/dim]")
             return 0
 
         formatter.print_tasks(
@@ -187,6 +218,7 @@ def _run_query_command(
             limit=actual_limit,
             sort_key=actual_sort,
             show_file=show_file,
+            output_format=output_format,
         )
         return 0
     except Exception as e:
@@ -204,10 +236,15 @@ def next(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """Show next actionable tasks (STRT or high-priority TODO)."""
     query = '(or (todo "STRT") (and (todo "TODO") (priority "A")))'
-    return _run_query_command(query, "No next actions found.", limit, sort, show_file)
+    return _run_query_command(
+        query, "No next actions found.", limit, sort, show_file, output_format
+    )
 
 
 @app.command()
@@ -219,10 +256,15 @@ def today(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """Show tasks due or scheduled for today (including overdue)."""
     query = "(and (not (done)) (or (deadline :to today) (scheduled :to today) (ts-active :on today)))"
-    return _run_query_command(query, "No tasks for today.", limit, sort, show_file)
+    return _run_query_command(
+        query, "No tasks for today.", limit, sort, show_file, output_format
+    )
 
 
 @app.command()
@@ -234,10 +276,15 @@ def week(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """Show tasks for the coming week."""
     query = "(and (not (done)) (or (deadline :from today :to +7) (scheduled :from today :to +7)))"
-    return _run_query_command(query, "No tasks for this week.", limit, sort, show_file)
+    return _run_query_command(
+        query, "No tasks for this week.", limit, sort, show_file, output_format
+    )
 
 
 @app.command()
@@ -249,10 +296,15 @@ def overdue(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """Show overdue tasks."""
     query = "(and (not (done)) (deadline :to -1))"
-    return _run_query_command(query, "No overdue tasks.", limit, sort, show_file)
+    return _run_query_command(
+        query, "No overdue tasks.", limit, sort, show_file, output_format
+    )
 
 
 @app.command()
@@ -264,11 +316,14 @@ def done(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """Show recently completed tasks."""
     query = "(done)"
     return _run_query_command(
-        query, "No completed tasks found.", limit, sort, show_file
+        query, "No completed tasks found.", limit, sort, show_file, output_format
     )
 
 
@@ -281,11 +336,14 @@ def projects(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """Show active projects (headings with 'project' tag)."""
     query = '(and (tags "project") (not (done)))'
     return _run_query_command(
-        query, "No active projects found.", limit, sort, show_file
+        query, "No active projects found.", limit, sort, show_file, output_format
     )
 
 
@@ -298,10 +356,15 @@ def waiting(
         None, "--sort", help="Sort by: priority, due, scheduled, heading"
     ),
     show_file: bool = typer.Option(False, "--show-file", help="Show source filename"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
 ):
     """Show tasks waiting on something (WAIT state or 'waiting' tag)."""
     query = '(or (todo "WAIT") (tags "waiting"))'
-    return _run_query_command(query, "No waiting tasks found.", limit, sort, show_file)
+    return _run_query_command(
+        query, "No waiting tasks found.", limit, sort, show_file, output_format
+    )
 
 
 @app.command()
@@ -441,6 +504,203 @@ def set_state(
 
     console.print(f"[green]State changed:[/green] {message}")
     return 0
+
+
+@tag_app.command(name="add")
+def tag_add(
+    task_id: str = typer.Argument(..., help="Task ID (Org ID or handle)"),
+    tag: str = typer.Argument(..., help="Tag name to add"),
+    no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
+):
+    """Add a tag to a task."""
+    from org_warrior.HandleCache import HandleCache
+    from org_warrior import config
+
+    if not tag:
+        err_console.print("[red]Error: tag name cannot be empty[/red]")
+        raise typer.Exit(code=1)
+
+    # Resolve handle to Org ID
+    with HandleCache() as handle_cache:
+        org_id = handle_cache.resolve(task_id)
+        if not org_id:
+            raise typer.Exit(code=1)
+
+    # Modify tag
+    success, message = OrgQL.modify_tags(org_id, "add", tag)
+    if not success:
+        err_console.print(f"[red]Error: {message}[/red]")
+        raise typer.Exit(code=1)
+
+    # Auto-commit to git if enabled
+    if not no_git:
+        config.git_commit_org(f"org-warrior: tag add {tag} {org_id}")
+
+    console.print(f"[green]Tag added:[/green] {message}")
+
+
+@tag_app.command(name="remove")
+def tag_remove(
+    task_id: str = typer.Argument(..., help="Task ID (Org ID or handle)"),
+    tag: str = typer.Argument(..., help="Tag name to remove"),
+    no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
+):
+    """Remove a tag from a task."""
+    from org_warrior.HandleCache import HandleCache
+    from org_warrior import config
+
+    if not tag:
+        err_console.print("[red]Error: tag name cannot be empty[/red]")
+        raise typer.Exit(code=1)
+
+    # Resolve handle to Org ID
+    with HandleCache() as handle_cache:
+        org_id = handle_cache.resolve(task_id)
+        if not org_id:
+            raise typer.Exit(code=1)
+
+    # Modify tag
+    success, message = OrgQL.modify_tags(org_id, "remove", tag)
+    if not success:
+        err_console.print(f"[red]Error: {message}[/red]")
+        raise typer.Exit(code=1)
+
+    # Auto-commit to git if enabled
+    if not no_git:
+        config.git_commit_org(f"org-warrior: tag remove {tag} {org_id}")
+
+    console.print(f"[green]Tag removed:[/green] {message}")
+
+
+@modify_app.command(name="property")
+def modify_property(
+    task_id: str = typer.Argument(..., help="Task ID (Org ID or handle)"),
+    key: str = typer.Argument(..., help="Property name"),
+    value: Optional[str] = typer.Argument(None, help="Property value (omit to remove)"),
+    remove: bool = typer.Option(
+        False, "--remove", "-r", help="Remove the property instead of setting it"
+    ),
+    no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
+):
+    """Set or remove a property on a task."""
+    from org_warrior.HandleCache import HandleCache
+    from org_warrior import config
+
+    # Determine action
+    if remove:
+        action = "remove"
+        prop_value = ""
+    elif value is not None:
+        action = "set"
+        prop_value = value
+    else:
+        err_console.print(
+            "[red]Error: provide a value to set, or use --remove to delete the property[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    if not key:
+        err_console.print("[red]Error: property name cannot be empty[/red]")
+        raise typer.Exit(code=1)
+
+    # Resolve handle to Org ID
+    with HandleCache() as handle_cache:
+        org_id = handle_cache.resolve(task_id)
+        if not org_id:
+            raise typer.Exit(code=1)
+
+    # Modify property
+    success, message = OrgQL.modify_property(org_id, action, key, prop_value)
+    if not success:
+        err_console.print(f"[red]Error: {message}[/red]")
+        raise typer.Exit(code=1)
+
+    # Auto-commit to git if enabled
+    if not no_git:
+        config.git_commit_org(f"org-warrior: modify property {action} {key} {org_id}")
+
+    console.print(f"[green]Property modified:[/green] {message}")
+
+
+@app.command(name="add-child")
+def add_child(
+    parent_id: str = typer.Argument(..., help="Parent task ID (Org ID or handle)"),
+    title: str = typer.Argument(..., help="Title of the new child task"),
+    no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
+):
+    """Add a child TODO task under an existing task."""
+    from org_warrior.HandleCache import HandleCache
+    from org_warrior import config
+
+    if not title.strip():
+        err_console.print("[red]Error: task title cannot be empty[/red]")
+        raise typer.Exit(code=1)
+
+    # Resolve handle to Org ID
+    with HandleCache() as handle_cache:
+        org_id = handle_cache.resolve(parent_id)
+        if not org_id:
+            raise typer.Exit(code=1)
+
+    # Add child task
+    result = OrgQL.add_child_task(org_id, title)
+    if not result:
+        err_console.print("[red]Failed to create child task[/red]")
+        raise typer.Exit(code=1)
+
+    if result == "NOT_FOUND":
+        err_console.print(f"[red]Parent task not found: {parent_id}[/red]")
+        raise typer.Exit(code=1)
+
+    if result.startswith("ERROR:"):
+        err_console.print(f"[red]{result}[/red]")
+        raise typer.Exit(code=1)
+
+    # The result is the new child's org ID
+    child_org_id = result.strip('"')
+
+    # Generate handle for the new child task
+    with HandleCache() as handle_cache:
+        child_handle = handle_cache.get_handle(child_org_id)
+
+    # Auto-commit to git if enabled
+    if not no_git:
+        config.git_commit_org(f"org-warrior: add-child {child_org_id} under {org_id}")
+
+    console.print(f"[green]Created child:[/green] {child_handle} (ID: {child_org_id})")
+
+
+@app.command()
+def note(
+    task_id: str = typer.Argument(..., help="Task ID (Org ID or handle)"),
+    text: str = typer.Argument(..., help="Note text to append to the task"),
+    no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
+):
+    """Add a timestamped note to a task."""
+    from org_warrior.HandleCache import HandleCache
+    from org_warrior import config
+
+    if not text.strip():
+        err_console.print("[red]Error: note text cannot be empty[/red]")
+        raise typer.Exit(code=1)
+
+    # Resolve handle to Org ID
+    with HandleCache() as handle_cache:
+        org_id = handle_cache.resolve(task_id)
+        if not org_id:
+            raise typer.Exit(code=1)
+
+    # Add note
+    success, message = OrgQL.add_note(org_id, text)
+    if not success:
+        err_console.print(f"[red]Error: {message}[/red]")
+        raise typer.Exit(code=1)
+
+    # Auto-commit to git if enabled
+    if not no_git:
+        config.git_commit_org(f"org-warrior: note {org_id}")
+
+    console.print(f"[green]{message}[/green]")
 
 
 if __name__ == "__main__":

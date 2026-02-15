@@ -172,6 +172,9 @@ class OrgQL:
                     conditions.append("(deadline :from today :to +7)")
                 elif due == "overdue":
                     conditions.append("(deadline :to -1)")
+            elif arg.startswith("state:") or arg.startswith("status:"):
+                state = arg.split(":")[1].upper()
+                conditions.append(f'(todo "{_escape_elisp(state)}")')
             elif arg.startswith("scheduled:"):
                 sched = arg.split(":")[1]
                 if sched == "today":
@@ -186,15 +189,11 @@ class OrgQL:
     @staticmethod
     def get_task_by_id(org_id: str) -> Optional["Task"]:
         """Get a single task by its Org ID."""
-        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
-
-        files = resolve_org_files(config.ORG_FILES)
-        files_quoted = " ".join(f'"{f}"' for f in files)
 
         try:
             result = emacs_run_elisp_file(
-                "get-task-by-id.el", params={"files": files_quoted, "org_id": org_id}
+                "get-task-by-id.el", params={"org_id": org_id}
             )
             if not result or result.strip() == '""':
                 return None
@@ -327,8 +326,8 @@ class OrgQL:
                 "add-task.el",
                 params={
                     "title": title,
-                    "inbox_file": inbox_file,
-                    "inbox_heading": inbox_heading,
+                    "file": inbox_file,
+                    "heading": inbox_heading,
                 },
             )
             if result:
@@ -470,6 +469,143 @@ class OrgQL:
             return True, result.strip()
         except Exception as e:
             logging.error(f"Error setting state: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def modify_tags(org_id: str, action: str, tag: str) -> tuple[bool, str]:
+        """
+        Add or remove a tag on a task.
+
+        Args:
+            org_id: The Org ID of the task
+            action: "add" or "remove"
+            tag: Tag name (without +/- prefix)
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file(
+                "modify-tags.el",
+                params={
+                    "org_id": _escape_elisp(org_id),
+                    "action": _escape_elisp(action),
+                    "tag": _escape_elisp(tag),
+                },
+            )
+            if not result:
+                return False, "No response from Emacs"
+            if result == "NOT_FOUND":
+                return False, "Task not found"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, result.strip()
+        except Exception as e:
+            logging.error(f"Error modifying tags: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def modify_property(
+        org_id: str, action: str, key: str, value: str = ""
+    ) -> tuple[bool, str]:
+        """
+        Set or remove a property on a task.
+
+        Args:
+            org_id: The Org ID of the task
+            action: "set" or "remove"
+            key: Property name
+            value: Property value (ignored for remove)
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file(
+                "modify-property.el",
+                params={
+                    "org_id": _escape_elisp(org_id),
+                    "action": _escape_elisp(action),
+                    "key": _escape_elisp(key),
+                    "value": _escape_elisp(value),
+                },
+            )
+            if not result:
+                return False, "No response from Emacs"
+            if result == "NOT_FOUND":
+                return False, "Task not found"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, result.strip()
+        except Exception as e:
+            logging.error(f"Error modifying property: {e}")
+            return False, str(e)
+
+    @staticmethod
+    def add_child_task(parent_org_id: str, title: str) -> Optional[str]:
+        """
+        Add a child TODO task under a parent heading.
+
+        Args:
+            parent_org_id: The Org ID of the parent task
+            title: Title for the new child task
+
+        Returns:
+            The Org ID of the created child task, or None on error.
+            Returns "NOT_FOUND" if the parent task was not found.
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file(
+                "add-child-task.el",
+                params={
+                    "parent_org_id": _escape_elisp(parent_org_id),
+                    "title": _escape_elisp(title),
+                },
+            )
+            if not result:
+                return None
+            return result.strip()
+        except Exception as e:
+            logging.error(f"Error adding child task: {e}")
+            return None
+
+    @staticmethod
+    def add_note(org_id: str, note: str) -> tuple[bool, str]:
+        """
+        Add a timestamped note to a task.
+
+        Args:
+            org_id: The Org ID of the task
+            note: The note text to append
+
+        Returns:
+            Tuple of (success, message)
+        """
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        try:
+            result = emacs_run_elisp_file(
+                "add-note.el",
+                params={
+                    "org_id": _escape_elisp(org_id),
+                    "note": _escape_elisp(note),
+                },
+            )
+            if not result:
+                return False, "No response from Emacs"
+            if result == "NOT_FOUND":
+                return False, "Task not found"
+            if result.startswith("ERROR:"):
+                return False, result[6:].strip()
+            return True, result.strip()
+        except Exception as e:
+            logging.error(f"Error adding note: {e}")
             return False, str(e)
 
 

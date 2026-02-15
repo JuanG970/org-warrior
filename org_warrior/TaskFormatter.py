@@ -2,11 +2,17 @@
 
 from typing import Optional
 from datetime import date, datetime
+import csv
+import io
+import json
 import os
 from rich.console import Console
 from rich.table import Table
 
 from org_warrior.Org import Task, parse_org_timestamp, date_status
+
+# Valid output formats
+OUTPUT_FORMATS = ("table", "json", "csv")
 
 
 # Sorting keys for task lists
@@ -22,11 +28,63 @@ SORT_KEYS = {
 }
 
 
+# Color mapping for TODO states
+STATUS_COLORS = {
+    "TODO": "white",
+    "STRT": "green bold",
+    "WAIT": "yellow",
+    "HOLD": "magenta",
+    "DONE": "dim",
+    "CNCL": "dim strike",
+    "KILL": "dim strike",
+}
+
+
 class TaskFormatter:
     """Handles formatting and displaying tasks."""
 
     def __init__(self, console: Optional[Console] = None):
         self.console = console or Console()
+
+    @staticmethod
+    def _plain_date(value) -> str:
+        """Return a plain YYYY-MM-DD date string without Rich markup or org syntax."""
+        if not value:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, date):
+            return value.isoformat()
+        # Parse org timestamp strings like "<2026-02-16 Mon +1w -1d>"
+        parsed, _ = parse_org_timestamp(str(value))
+        if parsed:
+            return parsed.isoformat()
+        return str(value)
+
+    @staticmethod
+    def task_to_dict(
+        task: Task,
+        idx: int = 0,
+        show_ids: bool = False,
+        show_handles: bool = True,
+        show_file: bool = False,
+    ) -> dict:
+        """Serialize a Task to a plain dict (for JSON/CSV export)."""
+        d: dict = {"#": idx}
+        if show_handles:
+            d["handle"] = task.handle or ""
+        d["status"] = task.status or ""
+        d["priority"] = task.priority or ""
+        d["title"] = task.title
+        d["tags"] = ",".join(task.tags) if task.tags else ""
+        d["due"] = TaskFormatter._plain_date(task.deadline)
+        d["scheduled"] = TaskFormatter._plain_date(task.scheduled)
+        if show_ids:
+            d["id"] = task.org_id or ""
+        if show_file:
+            filepath = task.location.split(":")[0] if task.location else ""
+            d["file"] = os.path.basename(filepath) if filepath else ""
+        return d
 
     def format_date(self, value, kind: str = "DUE") -> str:
         """Format a date value with color coding."""
@@ -68,10 +126,16 @@ class TaskFormatter:
         limit: Optional[int] = None,
         sort_key: Optional[str] = None,
         show_file: bool = False,
+        output_format: str = "table",
     ):
-        """Print tasks in a formatted table."""
+        """Print tasks in a formatted table, JSON, or CSV."""
         if not tasks:
-            self.console.print("[yellow]No tasks found.[/yellow]")
+            if output_format == "json":
+                self.console.print("[]")
+            elif output_format == "csv":
+                pass  # empty CSV is fine
+            else:
+                self.console.print("[yellow]No tasks found.[/yellow]")
             return
 
         # Apply sorting
@@ -82,16 +146,40 @@ class TaskFormatter:
         display_tasks = tasks[:limit] if limit else tasks
         total = len(tasks)
 
-        # Create rich table
+        # ---- JSON output ----
+        if output_format == "json":
+            rows = [
+                self.task_to_dict(task, idx, show_ids, show_handles, show_file)
+                for idx, task in enumerate(display_tasks, 1)
+            ]
+            self.console.print(json.dumps(rows, indent=2))
+            return
+
+        # ---- CSV output ----
+        if output_format == "csv":
+            rows = [
+                self.task_to_dict(task, idx, show_ids, show_handles, show_file)
+                for idx, task in enumerate(display_tasks, 1)
+            ]
+            if rows:
+                buf = io.StringIO()
+                writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+                self.console.print(buf.getvalue().rstrip())
+            return
+
+        # ---- Rich table output ----
         table = Table(title="Tasks")
 
         # Add columns
         table.add_column("#", style="dim", no_wrap=True)
         if show_handles:
             table.add_column("Handle", style="dim", no_wrap=True)
-        table.add_column("Status", style="cyan", no_wrap=True)
-        table.add_column("Priority", style="yellow", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Pri", style="yellow", no_wrap=True)
         table.add_column("Title", style="bold")
+        table.add_column("Tags", style="magenta")
         table.add_column("Due", style="red")
         table.add_column("Scheduled", style="blue")
         if show_ids:
@@ -106,9 +194,16 @@ class TaskFormatter:
             if show_handles:
                 row.append(task.handle or "")
 
-            row.append(task.status or "")
+            # Status with color coding
+            status = task.status or ""
+            color = STATUS_COLORS.get(status, "cyan")
+            row.append(f"[{color}]{status}[/{color}]")
+
             row.append(task.priority or "")
             row.append(task.title)
+
+            # Tags
+            row.append(",".join(task.tags) if task.tags else "")
 
             # Format dates
             row.append(self.format_date(task.deadline, "DUE"))

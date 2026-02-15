@@ -104,6 +104,25 @@ class TestOrgQL:
         result = OrgQL.build_query("+path\\to\\tag")
         assert result == '(tags "path\\\\to\\\\tag")'
 
+    def test_build_query_state(self):
+        """Test query with state filter."""
+        assert OrgQL.build_query("state:STRT") == '(todo "STRT")'
+
+    def test_build_query_state_lowercase(self):
+        """Test state filter converts to uppercase."""
+        assert OrgQL.build_query("state:wait") == '(todo "WAIT")'
+
+    def test_build_query_status_alias(self):
+        """Test status: works as alias for state:."""
+        assert OrgQL.build_query("status:TODO") == '(todo "TODO")'
+
+    def test_build_query_state_with_other_filters(self):
+        """Test state filter combined with other filters."""
+        result = OrgQL.build_query("state:STRT +work")
+        assert result.startswith("(and ")
+        assert '(todo "STRT")' in result
+        assert '(tags "work")' in result
+
 
 class TestTask:
     """Tests for Task dataclass."""

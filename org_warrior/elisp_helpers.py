@@ -78,9 +78,9 @@ def emacs_run_elisp_file(
         # Format with parameters
         elisp = format_elisp(template, **(params or {}))
 
-        # Execute
+        # Execute via tmpfile to avoid stdout corruption on large responses
         handler = EmacsHandler(daemon=daemon or config.EMACS_SERVER)
-        result = handler.client.eval(elisp)
+        result = handler.client.eval(elisp, tmpfile=True)
 
         return result
     except Exception as e:

@@ -9,5 +9,9 @@ test-integration:
 lint:
 	ruff check src/org-warrior tests/
 
-install:
-	cp src/org-warrior ~/cli-apps/scripts/org-warrior
+
+build:
+	poetry build
+
+install: build
+	pipx install dist/*.whl --force

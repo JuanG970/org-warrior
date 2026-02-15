@@ -27,10 +27,13 @@
                 ;; Now we're after parent properties. Move to next line.
                 (forward-line 1)
                 (beginning-of-line)
-                (let ((pos (point)))
-                  (insert (format "%s TODO %s\n" child-stars "{title}"))
-                  (goto-char pos)
-                  (let ((new-id (org-id-get-create)))
-                    (save-buffer)
-                    new-id)))
+                ;; Insert new child heading at this position
+                (insert (format "%s TODO %s\n" child-stars "{title}"))
+                ;; Move back to the start of the line we just inserted
+                (forward-line -1)
+                (beginning-of-line)
+                ;; Create org-id for the new heading
+                (let ((new-id (org-id-get-create)))
+                  (save-buffer)
+                  new-id)))
             (error (format "ERROR: %s" (error-message-string err)))))))))

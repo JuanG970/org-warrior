@@ -5,19 +5,19 @@
 (progn
   (require 'org)
   (require 'org-id)
-  (require 'org-ql)
-  (let* ((query '(property "ID" "{org_id}"))
-         (results (org-ql-select (org-id-files)
-                    query
-                    :action '(list (substring-no-properties (org-get-heading t t t t))
-                                   (org-entry-get nil "TODO")
-                                   (org-entry-get nil "PRIORITY")
-                                   (org-entry-get nil "DEADLINE")
-                                   (org-entry-get nil "SCHEDULED")
-                                   (buffer-file-name)
-                                   (line-number-at-pos)
-                                   (org-entry-get nil "ID")
-                                   (org-get-tags)))))
-    (if results
-        (format "%S" (car results))
-      "")))
+  (let ((m (org-id-find "{org_id}" t)))
+    (if (not m)
+        ""
+      (with-current-buffer (marker-buffer m)
+        (save-excursion
+          (goto-char m)
+          (format "%S"
+                  (list (substring-no-properties (org-get-heading t t t t))
+                        (org-entry-get nil "TODO")
+                        (org-entry-get nil "PRIORITY")
+                        (org-entry-get nil "DEADLINE")
+                        (org-entry-get nil "SCHEDULED")
+                        (buffer-file-name)
+                        (line-number-at-pos)
+                        (org-entry-get nil "ID")
+                        (org-get-tags))))))))
