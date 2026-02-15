@@ -1,6 +1,6 @@
 [project]
 name = "org-warrior"
-version = "1.0.1"
+version = "1.0.2"
 description = "TaskWarrior-like CLI interface for org-ql"
 
 readme = "README.md"
