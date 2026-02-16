@@ -595,7 +595,12 @@ class OrgQL:
             The Org ID of the created child task, or None on error.
             Returns "NOT_FOUND" if the parent task was not found.
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
@@ -603,6 +608,7 @@ class OrgQL:
                 params={
                     "parent_org_id": _escape_elisp(parent_org_id),
                     "title": _escape_elisp(title),
+                    "files": files_quoted,
                 },
             )
             if not result:
@@ -624,7 +630,12 @@ class OrgQL:
         Returns:
             Tuple of (success, message)
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
@@ -632,6 +643,7 @@ class OrgQL:
                 params={
                     "org_id": _escape_elisp(org_id),
                     "note": _escape_elisp(note),
+                    "files": files_quoted,
                 },
             )
             if not result:
