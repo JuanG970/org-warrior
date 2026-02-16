@@ -189,11 +189,16 @@ class OrgQL:
     @staticmethod
     def get_task_by_id(org_id: str) -> Optional["Task"]:
         """Get a single task by its Org ID."""
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
-                "get-task-by-id.el", params={"org_id": org_id}
+                "get-task-by-id.el", params={"org_id": org_id, "files": files_quoted}
             )
             if not result or result.strip() == '""':
                 return None
@@ -348,10 +353,15 @@ class OrgQL:
         Returns:
             Tuple of (success, message)
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
 
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
+
         try:
-            result = emacs_run_elisp_file("clock-in.el", params={"org_id": org_id})
+            result = emacs_run_elisp_file("clock-in.el", params={"org_id": org_id, "files": files_quoted})
             if not result:
                 return False, "No response from Emacs"
             if result == "NOT_FOUND":
@@ -396,11 +406,16 @@ class OrgQL:
         Returns:
             Tuple of (success, message)
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
-                "schedule.el", params={"org_id": org_id, "date": date}
+                "schedule.el", params={"org_id": org_id, "date": date, "files": files_quoted}
             )
             if not result:
                 return False, "No response from Emacs"
@@ -425,11 +440,16 @@ class OrgQL:
         Returns:
             Tuple of (success, message)
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
-                "deadline.el", params={"org_id": org_id, "date": date}
+                "deadline.el", params={"org_id": org_id, "date": date, "files": files_quoted}
             )
             if not result:
                 return False, "No response from Emacs"
@@ -454,11 +474,16 @@ class OrgQL:
         Returns:
             Tuple of (success, message)
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
-                "set-state.el", params={"org_id": org_id, "state": state}
+                "set-state.el", params={"org_id": org_id, "state": state, "files": files_quoted}
             )
             if not result:
                 return False, "No response from Emacs"
@@ -484,7 +509,12 @@ class OrgQL:
         Returns:
             Tuple of (success, message)
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
@@ -493,6 +523,7 @@ class OrgQL:
                     "org_id": _escape_elisp(org_id),
                     "action": _escape_elisp(action),
                     "tag": _escape_elisp(tag),
+                    "files": files_quoted,
                 },
             )
             if not result:
@@ -522,7 +553,12 @@ class OrgQL:
         Returns:
             Tuple of (success, message)
         """
+        from org_warrior import config
         from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
             result = emacs_run_elisp_file(
@@ -532,6 +568,7 @@ class OrgQL:
                     "action": _escape_elisp(action),
                     "key": _escape_elisp(key),
                     "value": _escape_elisp(value),
+                    "files": files_quoted,
                 },
             )
             if not result:

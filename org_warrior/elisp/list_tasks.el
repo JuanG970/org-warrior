@@ -17,15 +17,16 @@
 
 (progn
   (require 'org-ql)
-  (let ((results (org-ql-select '({files_quoted})
-                   '{query}
-                   :action '{select_expr})))
-    (mapconcat (lambda (r)
-                 (if (listp r)
-                     (format "%S" r)
-                   (format "%s" r)))
-               results
-               "\\n")))
+  (let ((org-agenda-files '({files_quoted})))
+    (let ((results (org-ql-select '({files_quoted})
+                     '{query}
+                     :action '{select_expr})))
+      (mapconcat (lambda (r)
+                   (if (listp r)
+                       (format "%S" r)
+                     (format "%s" r)))
+                 results
+                 "\\n"))))
 
 
 ;;; list_tasks.el ends here
