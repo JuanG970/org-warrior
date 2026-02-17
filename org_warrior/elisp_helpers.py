@@ -83,9 +83,8 @@ def emacs_run_elisp_file(
         result = handler.client.eval(elisp, tmpfile=True)
 
         return result
-    except Exception as e:
-        logging.error(f"Error executing elisp file {filename}: {e}")
-        return None
+    except KeyError as e:
+        raise Exception(f"Missing parameter for elisp template: {e}")
 
 
 def emacs_run_elisp_string(elisp: str, daemon: Optional[str] = None) -> Optional[str]:

@@ -571,6 +571,32 @@ def tag_remove(
 
     console.print(f"[green]Tag removed:[/green] {message}")
 
+@app.command(name="properties")
+def view_properties(
+    task_id: str = typer.Argument(..., help="Task ID (Org ID or handle)"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    )
+):
+    """Get the properties on a task."""
+    from org_warrior.HandleCache import HandleCache
+    from org_warrior import config
+
+    # Resolve handle to Org ID
+    with HandleCache() as handle_cache:
+        org_id = handle_cache.resolve(task_id)
+        if not org_id:
+            raise typer.Exit(code=1)
+
+    try:
+        task = OrgQL.get_task_by_id(org_id)
+        if not task:
+            err_console.print(f"[red]No task found with ID: {org_id}[/red]")
+            raise typer.Exit(code=1)
+        formatter.print_properties(task, output_format)
+    except Exception as e:
+        err_console.print(f"[red]Error retrieving task: {e}[/red]")
+        raise typer.Exit(code=1)
 
 @modify_app.command(name="property")
 def modify_property(

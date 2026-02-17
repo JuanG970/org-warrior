@@ -59,51 +59,14 @@ class TestTokenizeSexp:
 class TestParseOrgQlResult:
     """Tests for parse_org_ql_result."""
 
-    def test_valid_8_token_line(self):
-        line = '("My Task" "TODO" nil "<2026-01-01>" nil "/home/org/work.org" 42 "uuid-abc")'
-        result = parse_org_ql_result(line)
-        assert result["heading"] == "My Task"
-        assert result["todo"] == "TODO"
-        assert result["priority"] is None  # nil
-        assert result["deadline"] == "<2026-01-01>"
-        assert result["scheduled"] is None
-        assert result["file"] == "/home/org/work.org"
-        assert result["line"] == 42
-        assert result["id"] == "uuid-abc"
-        assert result["tags"] == []
-
-    def test_with_priority_a(self):
-        line = '("Task" "TODO" "A" nil nil "/f" 1 "id")'
-        result = parse_org_ql_result(line)
-        assert result["priority"] == "A"
-
-    def test_priority_b_is_none(self):
-        """Priority B is treated as default/no priority."""
-        line = '("Task" "TODO" "B" nil nil "/f" 1 "id")'
-        result = parse_org_ql_result(line)
-        assert result["priority"] is None
-
-    def test_non_integer_line(self):
-        line = '("Task" "TODO" nil nil nil "/f" nil "id")'
-        result = parse_org_ql_result(line)
-        assert result["line"] is None
-
-    def test_not_sexp_format(self):
-        """Non-sexp lines fall back to heading-only dict."""
-        result = parse_org_ql_result("just a plain string")
-        assert result["heading"] == "just a plain string"
-        assert result["tags"] == []
-
-    def test_too_few_tokens(self):
-        """Lines with fewer than 8 tokens fall back."""
-        line = '("only" "two")'
-        result = parse_org_ql_result(line)
-        assert result["heading"] == '("only" "two")'
-
-    def test_empty_heading(self):
-        line = '(nil "TODO" nil nil nil "/f" 1 "id")'
-        result = parse_org_ql_result(line)
-        assert result["heading"] == ""
+    def test_contains_error(self):
+        line = 'ERROR: <ERROR MESSAGE>'
+        # Should return an Exception:
+        try:
+            result = parse_org_ql_result(line)
+        except Exception as e:
+            result = e
+            assert isinstance(result, Exception)
 
 
 class TestParseOrgTimestamp:

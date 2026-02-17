@@ -123,6 +123,60 @@ class TestOrgQL:
         assert '(todo "STRT")' in result
         assert '(tags "work")' in result
 
+    def test_build_query_or_two_states(self):
+        """Test OR between two state filters."""
+        result = OrgQL.build_query("state:AGENT or state:STRT")
+        assert result == '(or (todo "AGENT") (todo "STRT"))'
+
+    def test_build_query_or_multiple_states(self):
+        """Test OR across many state filters."""
+        result = OrgQL.build_query(
+            "state:AGENT or state:STRT or state:CODE or state:REVIEW or state:BLOCKED"
+        )
+        assert result.startswith("(or ")
+        assert '(todo "AGENT")' in result
+        assert '(todo "STRT")' in result
+        assert '(todo "CODE")' in result
+        assert '(todo "REVIEW")' in result
+        assert '(todo "BLOCKED")' in result
+        # Should NOT contain regexp "or"
+        assert '(regexp "or")' not in result
+
+    def test_build_query_or_with_and_groups(self):
+        """Test OR between AND groups."""
+        result = OrgQL.build_query("state:CODE +urgent or state:REVIEW +urgent")
+        assert result.startswith("(or ")
+        assert '(and (todo "CODE") (tags "urgent"))' in result
+        assert '(and (todo "REVIEW") (tags "urgent"))' in result
+
+    def test_build_query_explicit_and(self):
+        """Test explicit 'and' keyword is accepted (no-op)."""
+        result = OrgQL.build_query("state:TODO and +work")
+        assert result.startswith("(and ")
+        assert '(todo "TODO")' in result
+        assert '(tags "work")' in result
+
+    def test_build_query_or_case_insensitive(self):
+        """Test OR keyword is case-insensitive."""
+        result = OrgQL.build_query("state:AGENT OR state:STRT")
+        assert result == '(or (todo "AGENT") (todo "STRT"))'
+
+    def test_build_query_and_case_insensitive(self):
+        """Test AND keyword is case-insensitive."""
+        result = OrgQL.build_query("state:TODO AND +work")
+        assert '(todo "TODO")' in result
+        assert '(tags "work")' in result
+
+    def test_build_query_only_or_tokens(self):
+        """Test query with only 'or' tokens falls back to default."""
+        result = OrgQL.build_query("or or")
+        assert result == "(and (todo) (not (done)))"
+
+    def test_build_query_single_after_or(self):
+        """Test single condition after or."""
+        result = OrgQL.build_query("state:TODO or state:STRT")
+        assert result == '(or (todo "TODO") (todo "STRT"))'
+
 
 class TestTask:
     """Tests for Task dataclass."""

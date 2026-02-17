@@ -1,9 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 from datetime import datetime, date
 import logging
 import os
 import re
+import json
 
 
 def _escape_elisp(s: str) -> str:
@@ -113,30 +114,19 @@ def _tokenize_sexp(s: str) -> list:
     return tokens
 
 
-def parse_org_ql_result(line: str) -> dict:
-    """Parse a single result line from org-ql output."""
-    if line.startswith("(") and line.endswith(")"):
-        tokens = _tokenize_sexp(line[1:-1])
-        if len(tokens) >= 8:
-            heading, todo, priority, deadline, scheduled, filepath, lineno, org_id = (
-                tokens[:8]
-            )
-            tags = tokens[8] if len(tokens) > 8 else []
-            # Handle tags as a list if it's a nested structure
-            if isinstance(tags, str) and tags.startswith("("):
-                tags = _tokenize_sexp(tags[1:-1]) if tags != "()" else []
-            return {
-                "heading": heading or "",
-                "todo": todo,
-                "priority": priority if priority and priority != "B" else None,
-                "deadline": deadline,
-                "scheduled": scheduled,
-                "file": filepath,
-                "line": lineno if isinstance(lineno, int) else None,
-                "id": org_id,
-                "tags": tags if isinstance(tags, list) else [],
-            }
-    return {"heading": line, "tags": []}
+def parse_org_ql_result(result: str) -> dict:
+    """Parse a single result line from org-ql output. Should be JSON output since org-warrior version 1.1.0"""
+    try:
+        # Check if the string contains ERROR: <ERROR MESSAGE> if so return the failure
+        if result.startswith("ERROR:"):
+            error_message = result[6:].strip()
+            logging.error(f"Error from org-ql: {error_message}")
+            raise RuntimeError(f"Error from org-ql: {error_message}")
+        return json.loads(result)
+    except json.JSONDecodeError as e:
+        logging.error(f"Error parsing org-ql result: {e}")
+        raise
+
 
 
 class OrgQL:
@@ -145,9 +135,58 @@ class OrgQL:
     """
 
     @staticmethod
+    def _parse_filter(arg: str) -> Optional[str]:
+        """Parse a single filter token into an org-ql condition, or None if skipped."""
+        if arg.startswith("+"):
+            return f'(tags "{_escape_elisp(arg[1:])}")'
+        elif arg.startswith("project:"):
+            return '(ancestors (tags "project"))'
+        elif arg.startswith("pri:") or arg.startswith("priority:"):
+            pri = arg.split(":")[1].upper()
+            return f'(priority "{_escape_elisp(pri)}")'
+        elif arg.startswith("due:"):
+            due = arg.split(":")[1]
+            if due == "today":
+                return "(deadline :on today)"
+            elif due == "week":
+                return "(deadline :from today :to +7)"
+            elif due == "overdue":
+                return "(deadline :to -1)"
+        elif arg.startswith("state:") or arg.startswith("status:"):
+            state = arg.split(":")[1].upper()
+            return f'(todo "{_escape_elisp(state)}")'
+        elif arg.startswith("scheduled:"):
+            sched = arg.split(":")[1]
+            if sched == "today":
+                return "(scheduled :on today)"
+        else:
+            return f'(regexp "{_escape_elisp(arg)}")'
+        return None
+
+    @staticmethod
+    def _wrap_conditions(conditions: list[str]) -> str:
+        """Wrap a list of conditions: single = bare, multiple = (and ...)."""
+        conditions = [c for c in conditions if c]
+        if not conditions:
+            return "(and (todo) (not (done)))"
+        if len(conditions) == 1:
+            return conditions[0]
+        return f"(and {' '.join(conditions)})"
+
+    @staticmethod
     def build_query(query: str) -> str:
         """
         Build org-ql query from TaskWarrior-like filters.
+
+        Supports boolean operators:
+        - Tokens are implicitly AND-ed within a group.
+        - ``or`` splits into groups combined with ``(or ...)``.
+        - ``and`` is accepted for readability but is the default.
+
+        Examples:
+            state:AGENT or state:STRT
+            +work state:TODO
+            state:CODE or state:REVIEW +urgent
         """
         if query.strip() == "":
             return "(and (todo) (not (done)))"
@@ -155,36 +194,33 @@ class OrgQL:
         args = query.split()
         logging.debug(f"Parsing query args: {args}")
 
-        conditions = []
+        # Split args into groups separated by "or"
+        groups: list[list[str]] = [[]]
         for arg in args:
-            if arg.startswith("+"):
-                conditions.append(f'(tags "{_escape_elisp(arg[1:])}")')
-            elif arg.startswith("project:"):
-                conditions.append('(ancestors (tags "project"))')
-            elif arg.startswith("pri:") or arg.startswith("priority:"):
-                pri = arg.split(":")[1].upper()
-                conditions.append(f'(priority "{_escape_elisp(pri)}")')
-            elif arg.startswith("due:"):
-                due = arg.split(":")[1]
-                if due == "today":
-                    conditions.append("(deadline :on today)")
-                elif due == "week":
-                    conditions.append("(deadline :from today :to +7)")
-                elif due == "overdue":
-                    conditions.append("(deadline :to -1)")
-            elif arg.startswith("state:") or arg.startswith("status:"):
-                state = arg.split(":")[1].upper()
-                conditions.append(f'(todo "{_escape_elisp(state)}")')
-            elif arg.startswith("scheduled:"):
-                sched = arg.split(":")[1]
-                if sched == "today":
-                    conditions.append("(scheduled :on today)")
+            lower = arg.lower()
+            if lower == "or":
+                groups.append([])
+            elif lower == "and":
+                continue  # explicit AND is a no-op (default behaviour)
             else:
-                conditions.append(f'(regexp "{_escape_elisp(arg)}")')
+                groups[-1].append(arg)
 
-        if len(conditions) == 1:
-            return conditions[0]
-        return f"(and {' '.join(conditions)})"
+        # Parse each group into conditions
+        or_branches = []
+        for group in groups:
+            conditions = []
+            for arg in group:
+                cond = OrgQL._parse_filter(arg)
+                if cond:
+                    conditions.append(cond)
+            if conditions:
+                or_branches.append(OrgQL._wrap_conditions(conditions))
+
+        if not or_branches:
+            return "(and (todo) (not (done)))"
+        if len(or_branches) == 1:
+            return or_branches[0]
+        return f"(or {' '.join(or_branches)})"
 
     @staticmethod
     def get_task_by_id(org_id: str) -> Optional["Task"]:
@@ -205,15 +241,17 @@ class OrgQL:
 
             parsed = parse_org_ql_result(result)
             if parsed.get("id"):
+                # Get the task properties
                 return Task(
                     org_id=parsed["id"],
                     title=parsed["heading"],
                     tags=parsed.get("tags", []),
-                    location=f"{parsed.get('file', '')}:{parsed.get('line', 0)}",
+                    location=parsed.get("filename", "") + ":" + str(parsed.get("linenumber", "")),
                     status=parsed.get("todo"),
                     priority=parsed.get("priority"),
                     deadline=parsed.get("deadline"),
                     scheduled=parsed.get("scheduled"),
+                    properties=parsed.get("properties", {})
                 )
             return None
         except Exception as e:
@@ -270,35 +308,25 @@ class OrgQL:
             result = emacs_run_elisp_file(
                 "org-ql-select.el", params={"files": files_quoted, "query": query_str}
             )
+            print(f"result: {result}")
 
-            if not result:
-                return []
-
-            # Parse each line into a Task
-            tasks = []
             handle_cache = HandleCache() if assign_handles else None
-
-            for line in result.splitlines():
-                if not line.strip():
-                    continue
-                parsed = parse_org_ql_result(line)
-                if parsed.get("id"):
-                    handle = None
-                    if handle_cache:
-                        handle = handle_cache.get_handle(parsed["id"])
-
-                    task = Task(
-                        org_id=parsed["id"],
-                        title=parsed["heading"],
-                        tags=parsed.get("tags", []),
-                        location=f"{parsed.get('file', '')}:{parsed.get('line', 0)}",
-                        status=parsed.get("todo"),
-                        priority=parsed.get("priority"),
-                        deadline=parsed.get("deadline"),
-                        scheduled=parsed.get("scheduled"),
-                        handle=handle,
-                    )
-                    tasks.append(task)
+            parsed = parse_org_ql_result(result)
+            tasks = []
+            for item in parsed:
+                task = Task(
+                    org_id=item["id"],
+                    title=item["heading"],
+                    tags=item.get("tags", []),
+                    location=item.get("filename", "") + ":" + str(item.get("linenumber", "")),
+                    status=item.get("todo"),
+                    priority=item.get("priority"),
+                    deadline=item.get("deadline"),
+                    scheduled=item.get("scheduled"),
+                    handle=handle_cache.get_handle(item["id"]),
+                    properties=item.get("properties", {})
+                )
+                tasks.append(task)
 
             # Save handle cache if modified
             if handle_cache:
@@ -361,7 +389,9 @@ class OrgQL:
         files_quoted = " ".join(f'"{f}"' for f in file_list)
 
         try:
-            result = emacs_run_elisp_file("clock-in.el", params={"org_id": org_id, "files": files_quoted})
+            result = emacs_run_elisp_file(
+                "clock-in.el", params={"org_id": org_id, "files": files_quoted}
+            )
             if not result:
                 return False, "No response from Emacs"
             if result == "NOT_FOUND":
@@ -415,7 +445,8 @@ class OrgQL:
 
         try:
             result = emacs_run_elisp_file(
-                "schedule.el", params={"org_id": org_id, "date": date, "files": files_quoted}
+                "schedule.el",
+                params={"org_id": org_id, "date": date, "files": files_quoted},
             )
             if not result:
                 return False, "No response from Emacs"
@@ -449,7 +480,8 @@ class OrgQL:
 
         try:
             result = emacs_run_elisp_file(
-                "deadline.el", params={"org_id": org_id, "date": date, "files": files_quoted}
+                "deadline.el",
+                params={"org_id": org_id, "date": date, "files": files_quoted},
             )
             if not result:
                 return False, "No response from Emacs"
@@ -483,7 +515,8 @@ class OrgQL:
 
         try:
             result = emacs_run_elisp_file(
-                "set-state.el", params={"org_id": org_id, "state": state, "files": files_quoted}
+                "set-state.el",
+                params={"org_id": org_id, "state": state, "files": files_quoted},
             )
             if not result:
                 return False, "No response from Emacs"
@@ -672,6 +705,7 @@ class Task:
     scheduled: Optional[datetime] = None
     deadline: Optional[datetime] = None
     handle: Optional[str] = None
+    properties: dict = field(default_factory=dict)
 
     def is_done(self) -> bool:
         """Check if task is completed."""

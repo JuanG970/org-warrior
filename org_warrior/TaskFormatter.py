@@ -281,3 +281,23 @@ class TaskFormatter:
             lines.append(f"  ID: {task.org_id}")
 
         return "\n".join(lines)
+
+    def print_properties(self, task, output_format="table"):
+        """Print all properties of a task. As a pretty table, or with the specified format."""
+        props = task.properties
+
+        if output_format == "json":
+            self.console.print(json.dumps(props, indent=2))
+        elif output_format == "csv":
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=props.keys())
+            writer.writeheader()
+            writer.writerow(props)
+            self.console.print(buf.getvalue().rstrip())
+        else:
+            table = Table(title="Task Properties")
+            table.add_column("Property", style="dim", no_wrap=True)
+            table.add_column("Value", style="bold")
+            for key, value in props.items():
+                table.add_row(key, str(value))
+            self.console.print(table)

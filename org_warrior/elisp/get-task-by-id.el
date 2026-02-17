@@ -6,20 +6,25 @@
 (progn
   (require 'org)
   (require 'org-id)
+  (require 'json)
   (let ((org-agenda-files '({files})))
     (let ((m (org-id-find "{org_id}" t)))
       (if (not m)
           ""
-        (with-current-buffer (marker-buffer m)
-          (save-excursion
-            (goto-char m)
-            (format "%S"
-                    (list (substring-no-properties (org-get-heading t t t t))
-                          (org-entry-get nil "TODO")
-                          (org-entry-get nil "PRIORITY")
-                          (org-entry-get nil "DEADLINE")
-                          (org-entry-get nil "SCHEDULED")
-                          (buffer-file-name)
-                          (line-number-at-pos)
-                          (org-entry-get nil "ID")
-                          (org-get-tags)))))))))
+        (condition-case err
+            (with-current-buffer (marker-buffer m)
+              (save-excursion
+                (goto-char m)
+                (json-encode
+                 `(
+                   (heading . ,(substring-no-properties (org-get-heading t t t t)))
+                   (todo . ,(org-entry-get nil "TODO"))
+                   (priority . ,(org-entry-get nil "PRIORITY"))
+                   (deadline . ,(org-entry-get nil "DEADLINE"))
+                   (scheduled . ,(org-entry-get nil "SCHEDULED"))
+                   (filename . ,(buffer-file-name))
+                   (linenumber . ,(line-number-at-pos))
+                   (id . ,(org-entry-get nil "ID"))
+                   (tags . ,(org-get-tags))
+                   (properties . ,(org-entry-properties m))))))
+          (error (format "ERROR: %s" (error-message-string err))))))))
