@@ -308,7 +308,6 @@ class OrgQL:
             result = emacs_run_elisp_file(
                 "org-ql-select.el", params={"files": files_quoted, "query": query_str}
             )
-            print(f"result: {result}")
 
             handle_cache = HandleCache() if assign_handles else None
             parsed = parse_org_ql_result(result)
