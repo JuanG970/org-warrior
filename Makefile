@@ -11,6 +11,7 @@ lint:
 
 
 build:
+	rm -rf dist/
 	poetry build
 
 install: build
