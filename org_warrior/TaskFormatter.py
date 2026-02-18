@@ -8,6 +8,7 @@ import json
 import os
 from rich.console import Console
 from rich.table import Table
+from rich.syntax import Syntax
 
 from org_warrior.Org import Task, parse_org_timestamp, date_status
 
@@ -64,17 +65,20 @@ class TaskFormatter:
     @staticmethod
     def task_to_dict(
         task: Task,
-        idx: int = 0,
+        idx,
         show_ids: bool = False,
         show_handles: bool = True,
         show_file: bool = False,
     ) -> dict:
         """Serialize a Task to a plain dict (for JSON/CSV export)."""
-        d: dict = {"#": idx}
+        d: dict = {}
+        if idx is not None:
+            d["index"] = idx
         if show_handles:
             d["handle"] = task.handle or ""
         d["status"] = task.status or ""
         d["priority"] = task.priority or ""
+        d["properties"] = task.properties or {}
         d["title"] = task.title
         d["tags"] = ",".join(task.tags) if task.tags else ""
         d["due"] = TaskFormatter._plain_date(task.deadline)
@@ -84,6 +88,8 @@ class TaskFormatter:
         if show_file:
             filepath = task.location.split(":")[0] if task.location else ""
             d["file"] = os.path.basename(filepath) if filepath else ""
+        if task.body:
+            d["body"] = task.body
         return d
 
     def format_date(self, value, kind: str = "DUE") -> str:
@@ -237,8 +243,11 @@ class TaskFormatter:
         else:
             self.console.print(f"\n[dim]{total} task(s)[/dim]")
 
-    def format_task_detail(self, task: Task, idx: Optional[int] = None) -> str:
+    def format_task_detail(self, task: Task, idx: Optional[int] = None, output_format="table") -> None:
         """Format a task with detailed information."""
+        if output_format == "json":
+            self.console.print(json.dumps(self.task_to_dict(task, idx, show_ids=True, show_handles=True), indent=2))
+            return
         lines = []
 
         # Header
@@ -280,7 +289,14 @@ class TaskFormatter:
         if task.org_id:
             lines.append(f"  ID: {task.org_id}")
 
-        return "\n".join(lines)
+        for l in lines:
+            self.console.print(l)
+        # Body
+        if task.body:
+            self.console.print("\n  [bold]Body:[/bold]")
+            body_syntax = Syntax(task.body, "org", theme="monokai", word_wrap=True)
+            self.console.print(body_syntax)
+
 
     def print_properties(self, task, output_format="table"):
         """Print all properties of a task. As a pretty table, or with the specified format."""

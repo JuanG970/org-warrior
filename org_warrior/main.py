@@ -5,7 +5,6 @@ import sys
 from typing import Optional
 import typer
 from rich.console import Console
-from rich.syntax import Syntax
 
 from org_warrior import config
 from org_warrior.Org import OrgQL
@@ -101,6 +100,9 @@ def list(
 def show(
     task_id: str = typer.Argument(..., help="Task ID (Org ID or handle)"),
     no_body: bool = typer.Option(False, "--no-body", help="Don't show task body"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    )
 ):
     """Show detailed information about a task."""
     from org_warrior.HandleCache import HandleCache
@@ -120,26 +122,24 @@ def show(
     # Assign handle to the task
     with HandleCache() as handle_cache:
         task.handle = handle_cache.get_handle(org_id)
-
-    # Format and display task details
-    detail_output = formatter.format_task_detail(task)
-    console.print(detail_output)
-
-    # Get and display body if requested
+    
+    # Get the body if requested
     if not no_body:
         try:
             body = OrgQL.get_task_body(org_id)
-            console.print("\nBody:")
-            if body and body.strip():
-                body_nice = Syntax(body, "org", theme="monokai", word_wrap=True)
-                console.print(body_nice)
-            else:
-                console.print("[dim](empty)[/dim]")
+            task.body = body
         except RuntimeError as e:
             err_console.print(f"[red]Error reading body: {e}[/red]")
             return 1
+    # Format and display task details
+    try:
+        formatter.format_task_detail(task, output_format=output_format)
+        return 0
+    except Exception as e:
+        err_console.print(f"[red]Error displaying task: {e}[/red]")
+        logging.exception("Error in show command")
+        return 1
 
-    return 0
 
 
 @app.command()
