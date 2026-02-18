@@ -126,7 +126,10 @@ def parse_org_ql_result(result: Optional[str]) -> list | dict:
             error_message = result[6:].strip()
             logging.error(f"Error from org-ql: {error_message}")
             raise RuntimeError(f"Error from org-ql: {error_message}")
-        return json.loads(result)
+        parsed = json.loads(result)
+        if parsed is None:
+            return []
+        return parsed
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing org-ql result: {e}")
         raise
