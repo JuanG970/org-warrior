@@ -321,6 +321,14 @@ class OrgQL:
             parsed = parse_org_ql_result(result)
             tasks = []
             for item in parsed:
+                # Skip tasks without ID property
+                if item.get("id") is None:
+                    logging.warning(
+                        f"Skipping task without ID: '{item.get('heading', 'Unknown')}' "
+                        f"at {item.get('filename', 'Unknown')}:{item.get('linenumber', '?')}"
+                    )
+                    continue
+                
                 task = Task(
                     org_id=item["id"],
                     title=item["heading"],
