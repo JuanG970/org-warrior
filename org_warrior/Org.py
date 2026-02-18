@@ -114,8 +114,12 @@ def _tokenize_sexp(s: str) -> list:
     return tokens
 
 
-def parse_org_ql_result(result: str) -> dict:
+def parse_org_ql_result(result: Optional[str]) -> list | dict:
     """Parse a single result line from org-ql output. Should be JSON output since org-warrior version 1.1.0"""
+    # Handle None or empty string from connection errors/timeouts
+    if result is None or result == "":
+        return []
+
     try:
         # Check if the string contains ERROR: <ERROR MESSAGE> if so return the failure
         if result.startswith("ERROR:"):
@@ -126,7 +130,6 @@ def parse_org_ql_result(result: str) -> dict:
     except json.JSONDecodeError as e:
         logging.error(f"Error parsing org-ql result: {e}")
         raise
-
 
 
 class OrgQL:
@@ -240,18 +243,23 @@ class OrgQL:
                 return None
 
             parsed = parse_org_ql_result(result)
+            # Handle case where parse_org_ql_result returns empty list (connection error)
+            if not isinstance(parsed, dict):
+                return None
             if parsed.get("id"):
                 # Get the task properties
                 return Task(
                     org_id=parsed["id"],
                     title=parsed["heading"],
                     tags=parsed.get("tags", []),
-                    location=parsed.get("filename", "") + ":" + str(parsed.get("linenumber", "")),
+                    location=parsed.get("filename", "")
+                    + ":"
+                    + str(parsed.get("linenumber", "")),
                     status=parsed.get("todo"),
                     priority=parsed.get("priority"),
                     deadline=parsed.get("deadline"),
                     scheduled=parsed.get("scheduled"),
-                    properties=parsed.get("properties", {})
+                    properties=parsed.get("properties", {}),
                 )
             return None
         except Exception as e:
@@ -317,13 +325,17 @@ class OrgQL:
                     org_id=item["id"],
                     title=item["heading"],
                     tags=item.get("tags", []),
-                    location=item.get("filename", "") + ":" + str(item.get("linenumber", "")),
+                    location=item.get("filename", "")
+                    + ":"
+                    + str(item.get("linenumber", "")),
                     status=item.get("todo"),
                     priority=item.get("priority"),
                     deadline=item.get("deadline"),
                     scheduled=item.get("scheduled"),
-                    handle=handle_cache.get_handle(item["id"]),
-                    properties=item.get("properties", {})
+                    handle=handle_cache.get_handle(item["id"])
+                    if handle_cache
+                    else None,
+                    properties=item.get("properties", {}),
                 )
                 tasks.append(task)
 

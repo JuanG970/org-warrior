@@ -1,7 +1,21 @@
 """Tests for OrgQL class and related functionality"""
 
 from datetime import datetime
-from org_warrior.Org import OrgQL, Task, _escape_elisp
+from org_warrior.Org import OrgQL, Task, _escape_elisp, parse_org_ql_result
+
+
+class TestParseOrgQlResult:
+    """Tests for parse_org_ql_result function."""
+
+    def test_parse_org_ql_result_none(self):
+        """Test that parse_org_ql_result handles None gracefully."""
+        result = parse_org_ql_result(None)
+        assert result == []
+
+    def test_parse_org_ql_result_empty_string(self):
+        """Test that parse_org_ql_result handles empty string gracefully."""
+        result = parse_org_ql_result("")
+        assert result == []
 
 
 class TestEscapeElisp:
