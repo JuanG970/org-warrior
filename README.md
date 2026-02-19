@@ -95,3 +95,7 @@ More Examples
     org-warrior +work due:week
     org-warrior show paper-salmon-quiet
     org-warrior handles-assign
+
+---
+
+Author: Juan Gonzalez
