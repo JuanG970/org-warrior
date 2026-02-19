@@ -142,35 +142,74 @@ def show(
 
 
 
+def _create_child_task(parent_id: str, title: str, no_git: bool) -> int:
+    """Shared implementation for creating a child task under a parent."""
+    from org_warrior.HandleCache import HandleCache
+
+    if not title.strip():
+        err_console.print("[red]Error: task title cannot be empty[/red]")
+        return 1
+
+    with HandleCache() as handle_cache:
+        parent_org_id = handle_cache.resolve(parent_id)
+        if not parent_org_id:
+            return 1
+
+    result = OrgQL.add_child_task(parent_org_id, title)
+    if not result:
+        err_console.print("[red]Failed to create child task[/red]")
+        return 1
+    if result == "NOT_FOUND":
+        err_console.print(f"[red]Parent task not found: {parent_id}[/red]")
+        return 1
+    if result.startswith("ERROR:"):
+        err_console.print(f"[red]{result}[/red]")
+        return 1
+
+    child_org_id = result.strip('"')
+    with HandleCache() as handle_cache:
+        handle = handle_cache.get_handle(child_org_id)
+
+    if not no_git:
+        config.git_commit_org(f"org-warrior: add {child_org_id} under {parent_org_id}")
+
+    console.print(f"[green]Created:[/green] {handle} (ID: {child_org_id})")
+    return 0
+
+
 @app.command()
 def add(
     title: str = typer.Argument(..., help="Title of the new task"),
+    parent: Optional[str] = typer.Option(
+        None, "--parent", "-p", help="Parent task ID (Org ID or handle) — adds as subtask"
+    ),
     inbox_file: str = typer.Option(
         "~/org/inbox.org", "--inbox-file", help="Inbox file path"
     ),
     inbox_heading: str = typer.Option("Inbox", "--inbox-heading", help="Inbox heading"),
     no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
 ):
-    """Add a new TODO task to the inbox."""
+    """Add a new TODO task to the inbox, or as a subtask under a parent."""
     from org_warrior.HandleCache import HandleCache
 
-    # Add the task
+    if parent:
+        rc = _create_child_task(parent, title, no_git)
+        if rc != 0:
+            raise typer.Exit(code=rc)
+        return
+
+    # Add to inbox (default)
     org_id = OrgQL.add_task(title, inbox_file, inbox_heading)
     if not org_id:
         err_console.print("[red]Failed to create task[/red]")
         return 1
 
-    # Generate handle for the new task
     with HandleCache() as handle_cache:
         handle = handle_cache.get_handle(org_id)
 
-    # Auto-commit to git if enabled
     if not no_git:
-        from org_warrior import config
-
         config.git_commit_org(f"org-warrior: add {org_id}")
 
-    # Display success message
     console.print(f"[green]Created:[/green] {handle} (ID: {org_id})")
     return 0
 
@@ -654,46 +693,42 @@ def add_child(
     title: str = typer.Argument(..., help="Title of the new child task"),
     no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
 ):
-    """Add a child TODO task under an existing task."""
+    """Add a child TODO task under an existing task (alias for: add --parent PARENT TITLE)."""
+    rc = _create_child_task(parent_id, title, no_git)
+    if rc != 0:
+        raise typer.Exit(code=rc)
+
+
+@app.command(name="get-parent")
+def get_parent(
+    task_id: str = typer.Argument(..., help="Task ID (Org ID or handle)"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json, csv"
+    ),
+):
+    """Show the parent task of a given task."""
     from org_warrior.HandleCache import HandleCache
-    from org_warrior import config
 
-    if not title.strip():
-        err_console.print("[red]Error: task title cannot be empty[/red]")
-        raise typer.Exit(code=1)
-
-    # Resolve handle to Org ID
     with HandleCache() as handle_cache:
-        org_id = handle_cache.resolve(parent_id)
+        org_id = handle_cache.resolve(task_id)
         if not org_id:
             raise typer.Exit(code=1)
 
-    # Add child task
-    result = OrgQL.add_child_task(org_id, title)
-    if not result:
-        err_console.print("[red]Failed to create child task[/red]")
+    parent = OrgQL.get_parent_task(org_id)
+    if not parent:
+        err_console.print(f"[yellow]No parent found for: {task_id}[/yellow]")
         raise typer.Exit(code=1)
 
-    if result == "NOT_FOUND":
-        err_console.print(f"[red]Parent task not found: {parent_id}[/red]")
+    if parent.org_id:
+        with HandleCache() as handle_cache:
+            parent.handle = handle_cache.get_handle(parent.org_id)
+
+    try:
+        formatter.format_task_detail(parent, output_format=output_format)
+    except Exception as e:
+        err_console.print(f"[red]Error displaying parent: {e}[/red]")
+        logging.exception("Error in get-parent command")
         raise typer.Exit(code=1)
-
-    if result.startswith("ERROR:"):
-        err_console.print(f"[red]{result}[/red]")
-        raise typer.Exit(code=1)
-
-    # The result is the new child's org ID
-    child_org_id = result.strip('"')
-
-    # Generate handle for the new child task
-    with HandleCache() as handle_cache:
-        child_handle = handle_cache.get_handle(child_org_id)
-
-    # Auto-commit to git if enabled
-    if not no_git:
-        config.git_commit_org(f"org-warrior: add-child {child_org_id} under {org_id}")
-
-    console.print(f"[green]Created child:[/green] {child_handle} (ID: {child_org_id})")
 
 
 @app.command()
