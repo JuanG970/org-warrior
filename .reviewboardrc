@@ -1,4 +1,0 @@
-REVIEWBOARD_URL = "http://localhost:8080/"
-REPOSITORY = "org-warrior"
-BRANCH = "main"
-API_TOKEN = None
