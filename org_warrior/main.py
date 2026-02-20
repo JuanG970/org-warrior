@@ -142,29 +142,29 @@ def show(
 
 
 
-def _create_child_task(parent_id: str, title: str, no_git: bool) -> int:
-    """Shared implementation for creating a child task under a parent."""
+def _create_child_task(parent_id: str, title: str, no_git: bool) -> None:
+    """Shared implementation for creating a child task under a parent.
+
+    Raises:
+        RuntimeError: on any failure (empty title, parent not found, emacs error)
+    """
     from org_warrior.HandleCache import HandleCache
 
     if not title.strip():
-        err_console.print("[red]Error: task title cannot be empty[/red]")
-        return 1
+        raise RuntimeError("task title cannot be empty")
 
     with HandleCache() as handle_cache:
         parent_org_id = handle_cache.resolve(parent_id)
-        if not parent_org_id:
-            return 1
+    if not parent_org_id:
+        raise RuntimeError(f"cannot resolve parent: {parent_id}")
 
     result = OrgQL.add_child_task(parent_org_id, title)
     if not result:
-        err_console.print("[red]Failed to create child task[/red]")
-        return 1
+        raise RuntimeError("failed to create child task")
     if result == "NOT_FOUND":
-        err_console.print(f"[red]Parent task not found: {parent_id}[/red]")
-        return 1
+        raise RuntimeError(f"parent task not found: {parent_id}")
     if result.startswith("ERROR:"):
-        err_console.print(f"[red]{result}[/red]")
-        return 1
+        raise RuntimeError(result[6:].strip())
 
     child_org_id = result.strip('"')
     with HandleCache() as handle_cache:
@@ -174,7 +174,6 @@ def _create_child_task(parent_id: str, title: str, no_git: bool) -> int:
         config.git_commit_org(f"org-warrior: add {child_org_id} under {parent_org_id}")
 
     console.print(f"[green]Created:[/green] {handle} (ID: {child_org_id})")
-    return 0
 
 
 @app.command()
@@ -193,9 +192,11 @@ def add(
     from org_warrior.HandleCache import HandleCache
 
     if parent:
-        rc = _create_child_task(parent, title, no_git)
-        if rc != 0:
-            raise typer.Exit(code=rc)
+        try:
+            _create_child_task(parent, title, no_git)
+        except RuntimeError as e:
+            err_console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(code=1)
         return
 
     # Add to inbox (default)
@@ -694,9 +695,11 @@ def add_child(
     no_git: bool = typer.Option(False, "--no-git", help="Don't auto-commit to git"),
 ):
     """Add a child TODO task under an existing task (alias for: add --parent PARENT TITLE)."""
-    rc = _create_child_task(parent_id, title, no_git)
-    if rc != 0:
-        raise typer.Exit(code=rc)
+    try:
+        _create_child_task(parent_id, title, no_git)
+    except RuntimeError as e:
+        err_console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(code=1)
 
 
 @app.command(name="get-parent")
