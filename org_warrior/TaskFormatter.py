@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import os
+import sys
 from rich.console import Console
 from rich.table import Table
 from rich.syntax import Syntax
@@ -158,7 +159,7 @@ class TaskFormatter:
                 self.task_to_dict(task, idx, show_ids, show_handles, show_file)
                 for idx, task in enumerate(display_tasks, 1)
             ]
-            self.console.print(json.dumps(rows, indent=2))
+            sys.stdout.write(json.dumps(rows, indent=2) + "\n")
             return
 
         # ---- CSV output ----
@@ -246,7 +247,7 @@ class TaskFormatter:
     def format_task_detail(self, task: Task, idx: Optional[int] = None, output_format="table") -> None:
         """Format a task with detailed information."""
         if output_format == "json":
-            self.console.print(json.dumps(self.task_to_dict(task, idx, show_ids=True, show_handles=True), indent=2))
+            sys.stdout.write(json.dumps(self.task_to_dict(task, idx, show_ids=True, show_handles=True), indent=2) + "\n")
             return
         lines = []
 
@@ -303,7 +304,7 @@ class TaskFormatter:
         props = task.properties
 
         if output_format == "json":
-            self.console.print(json.dumps(props, indent=2))
+            sys.stdout.write(json.dumps(props, indent=2) + "\n")
         elif output_format == "csv":
             buf = io.StringIO()
             writer = csv.DictWriter(buf, fieldnames=props.keys())
