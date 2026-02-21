@@ -5,7 +5,7 @@
 ;;   {tag}     - Tag name (already escaped)
 ;;   {files}   - Space-separated quoted file paths
 
-(progn
+(org-warrior-with-buffer-cleanup
   (require 'org)
   (require 'org-id)
   (let ((org-agenda-files '({files})))

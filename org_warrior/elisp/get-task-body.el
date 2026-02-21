@@ -2,7 +2,7 @@
 ;; Parameters:
 ;;   {org_id} - The Org ID to look up (already escaped)
 
-(progn
+(org-warrior-with-buffer-cleanup
   (require 'org)
   (require 'org-id)
   (let ((m (org-id-find "{org_id}" t)))

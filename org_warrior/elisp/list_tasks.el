@@ -15,7 +15,7 @@
 ;;
 ;;; Code:
 
-(progn
+(org-warrior-with-buffer-cleanup
   (require 'org-ql)
   (let ((org-agenda-files '({files_quoted})))
     (let ((results (org-ql-select '({files_quoted})

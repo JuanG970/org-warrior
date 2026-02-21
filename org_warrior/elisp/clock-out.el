@@ -1,5 +1,5 @@
 ;; Clock out from current task
-(progn
+(org-warrior-with-buffer-cleanup
   (require 'org-clock)
   (condition-case err
       (progn

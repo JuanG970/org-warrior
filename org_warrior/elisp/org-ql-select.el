@@ -3,7 +3,7 @@
 ;;   {files} - Space-separated quoted file paths
 ;;   {query} - org-ql query expression
 
-(progn
+(org-warrior-with-buffer-cleanup
   (require 'org-ql)
   (require 'json)
   (let ((org-agenda-files '({files})))

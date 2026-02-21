@@ -4,7 +4,7 @@
 ;;   {file} - Inbox file path
 ;;   {heading} - Inbox heading (already escaped)
 
-(progn
+(org-warrior-with-buffer-cleanup
   (require 'org)
   (require 'org-id)
   (let* ((file (expand-file-name "{file}"))

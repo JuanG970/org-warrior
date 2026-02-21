@@ -78,6 +78,12 @@ def emacs_run_elisp_file(
         # Format with parameters
         elisp = format_elisp(template, **(params or {}))
 
+        # Prepend the buffer cleanup wrapper macro definition so it is always
+        # available regardless of load-path configuration. Wrap both forms in
+        # a single progn so the emacs client receives one top-level expression.
+        wrapper = load_elisp_template("buffer-cleanup-wrapper.el")
+        elisp = f"(progn\n{wrapper}\n{elisp}\n)"
+
         # Execute via tmpfile to avoid stdout corruption on large responses
         handler = EmacsHandler(daemon=daemon or config.EMACS_SERVER)
         result = handler.client.eval(elisp, tmpfile=True)

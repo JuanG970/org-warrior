@@ -4,7 +4,7 @@
 ;;   {date}   - The deadline date
 ;;   {files}  - Space-separated quoted file paths
 
-(progn
+(org-warrior-with-buffer-cleanup
   (require 'org)
   (require 'org-id)
   (let ((org-agenda-files '({files})))
