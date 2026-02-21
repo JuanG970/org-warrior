@@ -674,6 +674,50 @@ class OrgQL:
             return None
 
     @staticmethod
+    def get_parent_task(org_id: str) -> Optional["Task"]:
+        """
+        Get the parent heading of a task by Org ID.
+
+        Args:
+            org_id: The Org ID of the child task
+
+        Returns:
+            Task object for the parent, or None if no parent or task not found.
+        """
+        from org_warrior import config
+        from org_warrior.elisp_helpers import emacs_run_elisp_file
+
+        files = config.ORG_FILES
+        file_list = resolve_org_files(files)
+        files_quoted = " ".join(f'"{f}"' for f in file_list)
+
+        try:
+            result = emacs_run_elisp_file(
+                "get-parent.el", params={"org_id": org_id, "files": files_quoted}
+            )
+            if not result or result.strip() in ("NOT_FOUND", "NO_PARENT"):
+                return None
+
+            parsed = parse_org_ql_result(result)
+            if not isinstance(parsed, dict):
+                return None
+
+            return Task(
+                org_id=parsed.get("id") or "",
+                title=parsed.get("heading", ""),
+                tags=parsed.get("tags", []),
+                location=parsed.get("filename", "") + ":" + str(parsed.get("linenumber", "")),
+                status=parsed.get("todo"),
+                priority=parsed.get("priority"),
+                deadline=parsed.get("deadline"),
+                scheduled=parsed.get("scheduled"),
+                properties=parsed.get("properties", {}),
+            )
+        except Exception as e:
+            logging.error(f"Error getting parent task: {e}")
+            return None
+
+    @staticmethod
     def add_note(org_id: str, note: str) -> tuple[bool, str]:
         """
         Add a timestamped note to a task.
