@@ -91,7 +91,11 @@ org-warrior list --no-handles # Hide handles, show just TODO states
 More Examples
 -------------
     org-warrior list
-    org-warrior today --ids 
+    org-warrior today --ids
     org-warrior +work due:week
     org-warrior show paper-salmon-quiet
     org-warrior handles-assign
+
+---
+
+Author: Juan Gonzalez
