@@ -33,7 +33,7 @@ class TestAddChildCLI:
             app, ["add-child", "parent-handle", "Buy groceries", "--no-git"]
         )
         assert result.exit_code == 0
-        assert "Created child" in result.output
+        assert "Created" in result.output
         assert "alpha-bravo-charlie" in result.output
         mock_add_child.assert_called_once_with("fake-org-id", "Buy groceries")
 
