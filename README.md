@@ -42,6 +42,28 @@ Commands
 - **handles-assign**: Scan org files for existing IDs and populate handle cache (warns about missing IDs)
 - **show/schedule/deadline/set-state**: Accept handle prefixes or full Org IDs
 
+List Output Schema
+------------------
+`list --format json|csv` emits one object per task. These keys are a stable
+contract for scripts; the same `LIST_FIELDS` tuple in
+`org_warrior/TaskFormatter.py` produces the JSON keys and the table columns.
+
+```json
+{ "index": 1, "handle": "paper-salmon-quiet", "status": "TODO", "priority": "A",
+  "title": "Fix parser bug", "tags": "work,urgent", "due": "2026-02-20",
+  "scheduled": "2026-02-15", "properties": {} }
+```
+
+- `index` (`#`): 1-based position in this result set, not a task identifier.
+- `handle`: friendly handle; omitted by `--no-handles`.
+- `status`, `priority`, `title`: task fields; empty string when unset.
+- `tags`: comma-separated tag string.
+- `due`, `scheduled`: `YYYY-MM-DD`, or `""` when unset.
+- `properties`: Org property dictionary (export only).
+- `id` (`ID`): Org ID; only present with `--ids`.
+- `file` (`File`): source filename basename; only with `--show-file`.
+- `body`: task body (export only); only present when non-empty.
+
 Data Files
 ----------
 - Wordlist: src/wordlist.txt (override with ~/.org-warrior/wordlist.txt)
