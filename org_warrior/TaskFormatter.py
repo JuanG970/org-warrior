@@ -6,7 +6,7 @@ import csv
 import io
 import json
 import os
-import sys
+from collections import namedtuple
 from rich.console import Console
 from rich.table import Table
 from rich.syntax import Syntax
@@ -42,6 +42,24 @@ STATUS_COLORS = {
 }
 
 
+# Ordered list schema for JSON/CSV keys and Rich table columns; see README.
+ListField = namedtuple("ListField", "key header style no_wrap in_table")
+
+
+def _field(key, header, style="", no_wrap=False, in_table=True):
+    return ListField(key, header, style, no_wrap, in_table)
+
+
+LIST_FIELDS = (
+    _field("index", "#", "dim", True), _field("handle", "Handle", "dim", True),
+    _field("status", "Status"), _field("priority", "Pri", "yellow", True),
+    _field("title", "Title", "bold"), _field("tags", "Tags", "magenta"),
+    _field("due", "Due", "red"), _field("scheduled", "Scheduled", "blue"),
+    _field("id", "ID", "dim"), _field("file", "File", "dim"),
+    _field("properties", "", in_table=False), _field("body", "", in_table=False),
+)
+
+
 class TaskFormatter:
     """Handles formatting and displaying tasks."""
 
@@ -64,6 +82,40 @@ class TaskFormatter:
         return str(value)
 
     @staticmethod
+    def _present(key, task, idx, show_ids, show_handles, show_file) -> bool:
+        flags = {"index": idx is not None, "handle": show_handles, "id": show_ids,
+                 "file": show_file, "body": bool(task.body)}
+        return flags.get(key, True)
+
+    @staticmethod
+    def _value(key, task, idx, table: bool = False):
+        """Value for one schema field, native for dicts and rendered for tables."""
+        if key == "index":
+            return str(idx) if table else idx
+        if key == "status":
+            status = task.status or ""
+            if table and status:
+                color = STATUS_COLORS.get(status, "cyan")
+                return f"[{color}]{status}[/{color}]"
+            return status
+        if key == "due":
+            if table:
+                return TaskFormatter.format_date(task.deadline, "DUE")
+            return TaskFormatter._plain_date(task.deadline)
+        if key == "scheduled":
+            return TaskFormatter._plain_date(task.scheduled)
+        if key == "id":
+            return (task.org_id or "")[:8] if table else (task.org_id or "")
+        if key == "file":
+            path = (task.location or "").split(":")[0]
+            return os.path.basename(path) if path else ""
+        if key == "properties":
+            return task.properties or {}
+        if key == "tags":
+            return ",".join(task.tags) if task.tags else ""
+        return getattr(task, key) or ""
+
+    @staticmethod
     def task_to_dict(
         task: Task,
         idx,
@@ -71,29 +123,14 @@ class TaskFormatter:
         show_handles: bool = True,
         show_file: bool = False,
     ) -> dict:
-        """Serialize a Task to a plain dict (for JSON/CSV export)."""
-        d: dict = {}
-        if idx is not None:
-            d["index"] = idx
-        if show_handles:
-            d["handle"] = task.handle or ""
-        d["status"] = task.status or ""
-        d["priority"] = task.priority or ""
-        d["properties"] = task.properties or {}
-        d["title"] = task.title
-        d["tags"] = ",".join(task.tags) if task.tags else ""
-        d["due"] = TaskFormatter._plain_date(task.deadline)
-        d["scheduled"] = TaskFormatter._plain_date(task.scheduled)
-        if show_ids:
-            d["id"] = task.org_id or ""
-        if show_file:
-            filepath = task.location.split(":")[0] if task.location else ""
-            d["file"] = os.path.basename(filepath) if filepath else ""
-        if task.body:
-            d["body"] = task.body
-        return d
+        """Serialize a Task to a plain dict; keys come from ``LIST_FIELDS``."""
+        return {
+            f.key: TaskFormatter._value(f.key, task, idx)
+            for f in LIST_FIELDS if TaskFormatter._present(f.key, task, idx, show_ids, show_handles, show_file)
+        }
 
-    def format_date(self, value, kind: str = "DUE") -> str:
+    @staticmethod
+    def format_date(value, kind: str = "DUE") -> str:
         """Format a date value with color coding."""
         if not value:
             return ""
@@ -159,7 +196,8 @@ class TaskFormatter:
                 self.task_to_dict(task, idx, show_ids, show_handles, show_file)
                 for idx, task in enumerate(display_tasks, 1)
             ]
-            sys.stdout.write(json.dumps(rows, indent=2) + "\n")
+            self.console.file.write(json.dumps(rows, indent=2) + "\n")
+            self.console.file.flush()
             return
 
         # ---- CSV output ----
@@ -179,63 +217,16 @@ class TaskFormatter:
         # ---- Rich table output ----
         table = Table(title="Tasks")
 
-        # Add columns
-        table.add_column("#", style="dim", no_wrap=True)
-        if show_handles:
-            table.add_column("Handle", style="dim", no_wrap=True)
-        table.add_column("Status", no_wrap=True)
-        table.add_column("Pri", style="yellow", no_wrap=True)
-        table.add_column("Title", style="bold")
-        table.add_column("Tags", style="magenta")
-        table.add_column("Due", style="red")
-        table.add_column("Scheduled", style="blue")
-        if show_ids:
-            table.add_column("ID", style="dim")
-        if show_file:
-            table.add_column("File", style="dim")
-
-        # Add rows
+        columns = [
+            f for f in LIST_FIELDS
+            if f.in_table and self._present(f.key, display_tasks[0], 1, show_ids, show_handles, show_file)
+        ]
+        for f in columns:
+            table.add_column(f.header, style=f.style or None, no_wrap=f.no_wrap)
         for idx, task in enumerate(display_tasks, 1):
-            row = [str(idx)]
-
-            if show_handles:
-                row.append(task.handle or "")
-
-            # Status with color coding
-            status = task.status or ""
-            color = STATUS_COLORS.get(status, "cyan")
-            row.append(f"[{color}]{status}[/{color}]")
-
-            row.append(task.priority or "")
-            row.append(task.title)
-
-            # Tags
-            row.append(",".join(task.tags) if task.tags else "")
-
-            # Format dates
-            row.append(self.format_date(task.deadline, "DUE"))
-
-            if task.scheduled:
-                if isinstance(task.scheduled, (datetime, date)):
-                    sched_str = (
-                        task.scheduled.strftime("%Y-%m-%d")
-                        if isinstance(task.scheduled, datetime)
-                        else task.scheduled.isoformat()
-                    )
-                else:
-                    sched_str = str(task.scheduled)
-                row.append(sched_str)
-            else:
-                row.append("")
-
-            if show_ids:
-                row.append(task.org_id[:8] if task.org_id else "")
-
-            if show_file:
-                filepath = task.location.split(":")[0] if task.location else ""
-                row.append(os.path.basename(filepath) if filepath else "")
-
-            table.add_row(*row)
+            table.add_row(
+                *[str(self._value(f.key, task, idx, True)) for f in columns]
+            )
 
         self.console.print(table)
 
@@ -244,11 +235,12 @@ class TaskFormatter:
         else:
             self.console.print(f"\n[dim]{total} task(s)[/dim]")
 
-    def format_task_detail(self, task: Task, idx: Optional[int] = None, output_format="table") -> None:
-        """Format a task with detailed information."""
+    def format_task_detail(self, task: Task, idx: Optional[int] = None, output_format="table") -> Optional[str]:
+        """Format a task with detailed information and return the rendered text."""
         if output_format == "json":
-            sys.stdout.write(json.dumps(self.task_to_dict(task, idx, show_ids=True, show_handles=True), indent=2) + "\n")
-            return
+            self.console.file.write(json.dumps(self.task_to_dict(task, idx, show_ids=True, show_handles=True), indent=2) + "\n")
+            self.console.file.flush()
+            return None
         lines = []
 
         # Header
@@ -297,6 +289,7 @@ class TaskFormatter:
             self.console.print("\n  [bold]Body:[/bold]")
             body_syntax = Syntax(task.body, "org", theme="monokai", word_wrap=True)
             self.console.print(body_syntax)
+        return "\n".join(lines)
 
 
     def print_properties(self, task, output_format="table"):
@@ -304,7 +297,8 @@ class TaskFormatter:
         props = task.properties
 
         if output_format == "json":
-            sys.stdout.write(json.dumps(props, indent=2) + "\n")
+            self.console.file.write(json.dumps(props, indent=2) + "\n")
+            self.console.file.flush()
         elif output_format == "csv":
             buf = io.StringIO()
             writer = csv.DictWriter(buf, fieldnames=props.keys())

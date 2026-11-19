@@ -9,6 +9,7 @@ from org_warrior.TaskFormatter import (
     SORT_KEYS,
     STATUS_COLORS,
     OUTPUT_FORMATS,
+    LIST_FIELDS,
 )
 from rich.console import Console
 from io import StringIO
@@ -171,7 +172,7 @@ class TestTaskToDict:
     def test_basic_dict(self):
         task = _make_task(status="STRT", priority="A", handle="alpha-bravo")
         d = TaskFormatter.task_to_dict(task, idx=1)
-        assert d["#"] == 1
+        assert d["index"] == 1
         assert d["handle"] == "alpha-bravo"
         assert d["status"] == "STRT"
         assert d["priority"] == "A"
@@ -299,6 +300,15 @@ class TestPrintTasksTable:
         output = self.output.getvalue()
         assert "Tags" in output
         assert "work" in output
+
+    def test_table_headers_follow_the_shared_schema(self):
+        out = StringIO()
+        TaskFormatter(Console(file=out, force_terminal=False, width=200)).print_tasks(
+            [_make_task(handle="h")], show_ids=True, show_file=True
+        )
+        for f in LIST_FIELDS:
+            if f.in_table:
+                assert f.header in out.getvalue()
 
     def test_table_sort_by_heading(self):
         tasks = [
